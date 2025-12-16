@@ -54,8 +54,6 @@
 .rag-settings {
   display: grid;
   gap: 14px;
-  background: var(--rag-bg-color);
-  padding: 10px;
   color: var(--rag-text-color);
 }
 
