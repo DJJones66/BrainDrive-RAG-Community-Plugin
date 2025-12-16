@@ -175,6 +175,14 @@ def get_required_env_vars_map() -> Dict[str, List[str]]:
   return {key: get_required_env_vars(key) for key in SERVICE_CONFIG}
 
 
+def update_health_urls(overrides: Dict[str, str]) -> None:
+  """Override service health URLs in-memory (used by lifecycle settings)."""
+  for key, url in (overrides or {}).items():
+    service = SERVICE_CONFIG.get(key)
+    if service and url:
+      service.health_url = url
+
+
 async def _run_python(script: Path, env: Optional[Dict[str, str]] = None, args: Optional[List[str]] = None, cwd: Optional[Path] = None) -> Dict[str, Any]:
   cmd = [DEFAULT_PYTHON_BIN, str(script)]
   if args:
@@ -296,9 +304,9 @@ async def shutdown_service(service_key: str) -> Dict[str, Any]:
   return await _run_python(script, env=_service_env(service), cwd=service.repo_path)
 
 
-async def health_check(service_key: str, timeout: int = 6) -> Dict[str, Any]:
+async def health_check(service_key: str, override_url: Optional[str] = None, timeout: int = 6) -> Dict[str, Any]:
   service = SERVICE_CONFIG[service_key]
-  url = service.health_url
+  url = override_url or service.health_url
 
   def _check():
     try:
@@ -488,6 +496,7 @@ __all__ = [
   "get_service_metadata",
   "get_required_env_vars",
   "get_required_env_vars_map",
+  "update_health_urls",
   "materialize_env_file",
   "update_env_and_restart",
 ]

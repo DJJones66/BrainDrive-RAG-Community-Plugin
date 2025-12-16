@@ -1,0 +1,241 @@
+/* Theme variables (mirrors Settings plugin palette so light/dark stay consistent) */
+:root {
+  --rag-bg-color: var(--theme-bg-color, #ffffff);
+  --rag-surface-color: var(--theme-surface-color, #f8fafc);
+  --rag-text-color: var(--theme-text-color, #333333);
+  --rag-muted-color: var(--theme-secondary-text, #666666);
+  --rag-border-color: var(--theme-border-color, rgba(0, 0, 0, 0.12));
+  --rag-card-outline: rgba(0, 0, 0, 0.08);
+  --rag-card-bg: var(--theme-bg-color, #ffffff);
+  --rag-card-shadow: 0 10px 18px rgba(0, 0, 0, 0.14);
+  --rag-button-bg: var(--rag-input-bg);
+  --rag-button-outline: #d1d5db;
+  --rag-button-border: var(--rag-button-outline);
+  --rag-button-text: var(--rag-text-color);
+  --rag-button-fill-bg: var(--theme-toggle-active, #2196F3);
+  --rag-button-fill-border: var(--theme-toggle-active, #2196F3);
+  --rag-button-fill-text: #ffffff;
+  --rag-banner-err-bg: #fef2f2;
+  --rag-banner-err-border: #fecdd3;
+  --rag-banner-err-text: #b91c1c;
+  --rag-banner-ok-bg: #ecfdf3;
+  --rag-banner-ok-border: #bbf7d0;
+  --rag-banner-ok-text: #166534;
+  --rag-input-bg: var(--rag-bg-color);
+  --rag-input-border: var(--rag-border-color);
+}
+
+.dark-theme {
+  --rag-bg-color: var(--theme-bg-color, #1e293b);
+  --rag-surface-color: var(--theme-surface-color, #0f172a);
+  --rag-text-color: var(--theme-text-color, #f8fafc);
+  --rag-muted-color: var(--theme-secondary-text, #cbd5e1);
+  --rag-border-color: var(--theme-border-color, rgba(30, 41, 59, 0.8));
+  --rag-card-outline: rgba(255, 255, 255, 0.08);
+  --rag-card-bg: #1b2738;
+  --rag-card-shadow: 0 10px 20px rgba(0, 0, 0, 0.35);
+  --rag-button-bg: #132033;
+  --rag-button-outline: #465878;
+  --rag-button-border: var(--rag-button-outline);
+  --rag-button-text: var(--rag-text-color);
+  --rag-button-fill-bg: var(--theme-toggle-active, #3b82f6);
+  --rag-button-fill-border: var(--theme-toggle-active, #3b82f6);
+  --rag-button-fill-text: var(--theme-text-color, #f8fafc);
+  --rag-banner-err-bg: #450a0a;
+  --rag-banner-err-border: #7f1d1d;
+  --rag-banner-err-text: #fecdd3;
+  --rag-banner-ok-bg: #123424;
+  --rag-banner-ok-border: #22c55e;
+  --rag-banner-ok-text: #c6f6d5;
+  --rag-input-bg: var(--rag-bg-color);
+  --rag-input-border: var(--rag-border-color);
+}
+
+.rag-settings {
+  display: grid;
+  gap: 14px;
+  background: var(--rag-bg-color);
+  padding: 10px;
+  color: var(--rag-text-color);
+}
+
+.rag-card {
+  background: var(--rag-card-bg);
+  border: 1px solid var(--rag-card-outline);
+  border-radius: 12px;
+  box-shadow: var(--rag-card-shadow);
+  color: var(--rag-text-color);
+  padding: 14px;
+  margin-bottom: 10px;
+}
+
+.rag-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.rag-card-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--rag-text-color);
+}
+
+.rag-card-description {
+  font-size: 13px;
+  color: var(--rag-muted-color);
+}
+
+.rag-meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  color: var(--rag-muted-color);
+  font-size: 13px;
+}
+
+.rag-checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--rag-text-color);
+}
+
+.rag-checkbox-row input[type="checkbox"] {
+  accent-color: var(--rag-button-fill-bg);
+}
+
+.rag-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+  align-items: center;
+}
+
+.rag-health {
+  font-size: 12px;
+  color: var(--rag-muted-color);
+}
+
+.rag-button {
+  padding: 8px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--rag-button-border);
+  background: var(--rag-button-bg);
+  color: var(--rag-button-text);
+  cursor: pointer;
+  font-weight: 600;
+  transition: background-color 0.2s ease, border-color 0.2s ease, opacity 0.2s ease;
+}
+
+.rag-button--primary {
+  background: var(--rag-button-fill-bg);
+  border-color: var(--rag-button-fill-border);
+  color: var(--rag-button-fill-text);
+}
+
+.rag-button:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+
+.rag-accordion {
+  border: 1px solid var(--rag-border-color);
+  border-radius: 10px;
+  padding: 12px;
+  background: var(--rag-bg-color);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
+}
+
+.rag-accordion summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--rag-text-color);
+}
+
+.rag-accordion-content {
+  margin-top: 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.rag-help {
+  font-size: 12px;
+  color: var(--rag-muted-color);
+}
+
+.rag-grid {
+  display: grid;
+  gap: 8px;
+}
+
+.rag-grid--compact {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.rag-grid--wide {
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+}
+
+.rag-section-stack {
+  display: grid;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.rag-field {
+  display: grid;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--rag-text-color);
+}
+
+.rag-field span {
+  font-weight: 600;
+}
+
+.rag-input,
+.rag-select {
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--rag-input-border);
+  font-size: 13px;
+  width: 100%;
+  background: var(--rag-input-bg);
+  color: var(--rag-text-color);
+  outline: none;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.rag-input:focus,
+.rag-select:focus {
+  border-color: var(--rag-button-fill-border);
+  box-shadow: 0 0 0 2px rgba(17, 24, 39, 0.1);
+}
+
+.dark-theme .rag-input:focus,
+.dark-theme .rag-select:focus {
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.15);
+}
+
+.rag-banner {
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--rag-border-color);
+}
+
+.rag-banner--error {
+  background: var(--rag-banner-err-bg);
+  color: var(--rag-banner-err-text);
+  border-color: var(--rag-banner-err-border);
+}
+
+.rag-banner--success {
+  background: var(--rag-banner-ok-bg);
+  color: var(--rag-banner-ok-text);
+  border-color: var(--rag-banner-ok-border);
+}

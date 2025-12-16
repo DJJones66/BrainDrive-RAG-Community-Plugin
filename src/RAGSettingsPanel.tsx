@@ -1,24 +1,19 @@
 import React from "react";
+import "./RAGTheme.css";
 
-type ServiceKey = "documentChat" | "documentProcessing";
+const SETTINGS_DEFINITION_ID = "braindrive_rag_service_settings";
+const PLUGIN_SLUG = "BrainDriveRAGCommunity";
 
-type ServiceConfig = {
-  key: ServiceKey;
-  label: string;
-  description: string;
-  defaultPort: number;
-  healthPath: string;
-  defaultMode: "venv" | "docker";
-};
-
-type ToggleState = {
-  status: "unknown" | "running" | "stopped" | "error";
-  lastMessage?: string;
-};
+type ServiceKey = "document_chat" | "document_processing";
 
 type ApiService = {
-  get?: (url: string, options?: unknown) => Promise<{ status?: number; data?: unknown }>;
-  post?: (url: string, body?: unknown, options?: unknown) => Promise<{ status?: number; data?: unknown }>;
+  get?: (url: string, options?: unknown) => Promise<any>;
+  post?: (url: string, body?: unknown, options?: unknown) => Promise<any>;
+};
+
+type SettingsService = {
+  getSetting?: (definitionId: string, options?: Record<string, unknown>) => Promise<any>;
+  setSetting?: (definitionId: string, value: any, options?: Record<string, unknown>) => Promise<any>;
 };
 
 type ThemeService = {
@@ -27,349 +22,588 @@ type ThemeService = {
   removeThemeChangeListener: (callback: (theme: string) => void) => void;
 };
 
-type PanelProps = {
-  title?: string;
-  subtitle?: string;
-  initialState?: Partial<Record<ServiceKey, ToggleState>>;
-  services?: {
-    api?: ApiService;
-    theme?: ThemeService;
-  };
+type Services = {
+  api?: ApiService;
+  settings?: SettingsService;
+  theme?: ThemeService;
 };
 
-type PanelState = {
-  toggles: Record<ServiceKey, ToggleState>;
-  healthMessages: Record<ServiceKey, string>;
+type PanelProps = {
+  services?: Services;
+};
+
+type ServiceSettings = {
+  enabled: boolean;
+  mode: "venv" | "docker";
+  protocol: string;
+  host: string;
+  port: number;
+  health_path: string;
+  env: Record<string, string>;
+};
+
+type SettingsValue = {
+  document_chat: ServiceSettings;
+  document_processing: ServiceSettings;
+  full_install?: boolean;
+};
+
+type State = {
+  settings: SettingsValue;
+  loading: boolean;
+  saving: boolean;
+  error?: string;
+  success?: string;
+  health: Record<ServiceKey, string>;
+  accordions: Record<string, boolean>;
   currentTheme: string;
 };
 
-type Palette = {
-  surface: string;
-  surfaceBorder: string;
-  card: string;
-  cardBorder: string;
-  text: string;
-  muted: string;
-  pillBg: string;
-  pillBorder: string;
-  pillText: string;
-  activeBorder: string;
-  activeBg: string;
-  activeText: string;
-  enabledBg: string;
-  enabledBorder: string;
-  enabledText: string;
-  disabledBg: string;
-  disabledBorder: string;
-  disabledText: string;
-  statusOk: string;
-  statusWarn: string;
-  statusErr: string;
-  shadow: string;
-};
-
-const SERVICE_CONFIG: ServiceConfig[] = [
-  {
-    key: "documentChat",
-    label: "Document Chat Service",
-    description: "User-facing chat API serving retrieved answers.",
-    defaultPort: 18000,
-    healthPath: "/health",
-    defaultMode: "venv"
-  },
-  {
-    key: "documentProcessing",
-    label: "Document Processing Service",
-    description: "Ingests and chunks documents for retrieval.",
-    defaultPort: 18080,
-    healthPath: "/health",
-    defaultMode: "venv"
-  }
-];
-
-function getPalette(theme: string): Palette {
-  const dark = (theme || "").toLowerCase().includes("dark");
-  if (dark) {
+const defaultServiceSettings = (service: ServiceKey): ServiceSettings => {
+  if (service === "document_chat") {
     return {
-      surface: "#0f172a",
-      surfaceBorder: "#16213a",
-      card: "#1E293B",          // align with Settings card background
-      cardBorder: "#25374f",    // subtle border similar to settings card
-      text: "#e5e7eb",
-      muted: "#9ba3b4",
-      pillBg: "#152037",
-      pillBorder: "#22314a",
-      pillText: "#e5e7eb",
-      activeBorder: "#3b82f6",
-      activeBg: "#12274a",
-      activeText: "#e0e7ff",
-      enabledBg: "#0f3a2e",
-      enabledBorder: "#22c55e",
-      enabledText: "#bbf7d0",
-      disabledBg: "#402c0f",
-      disabledBorder: "#f59e0b",
-      disabledText: "#fcd34d",
-      statusOk: "#22c55e",
-      statusWarn: "#f59e0b",
-      statusErr: "#ef4444",
-      shadow: "0 8px 28px rgba(0,0,0,0.32)"
+      enabled: true,
+      mode: "venv",
+      protocol: "http",
+      host: "localhost",
+      port: 18000,
+      health_path: "/health",
+      env: {
+        API_HOST: "localhost",
+        API_PORT: "18000",
+        DOCUMENT_PROCESSOR_API_URL: "http://localhost:18080/documents/",
+        LLM_PROVIDER: "ollama",
+        EMBEDDING_PROVIDER: "ollama",
+        OLLAMA_LLM_BASE_URL: "",
+        OLLAMA_LLM_MODEL: "",
+        OLLAMA_EMBEDDING_BASE_URL: "",
+        OLLAMA_EMBEDDING_MODEL: "",
+        ENABLE_CONTEXTUAL_RETRIEVAL: "false",
+        OLLAMA_CONTEXTUAL_LLM_BASE_URL: "",
+        OLLAMA_CONTEXTUAL_LLM_MODEL: "",
+        EVALUATION_PROVIDER: "openai",
+        OPENAI_EVALUATION_API_KEY: "",
+        OPENAI_EVALUATION_MODEL: "",
+      },
     };
   }
   return {
-    surface: "linear-gradient(135deg, #f8fafc 0%, #ffffff 60%)",
-    surfaceBorder: "#e5e7eb",
-    card: "#ffffff",
-    cardBorder: "#e2e8f0",
-    text: "#111827",
-    muted: "#4b5563",
-    pillBg: "#eef2ff",
-    pillBorder: "#d0d7ff",
-    pillText: "#283048",
-    activeBorder: "#2563eb",
-    activeBg: "#eff6ff",
-    activeText: "#1d4ed8",
-    enabledBg: "#e6fffa",
-    enabledBorder: "#14b8a6",
-    enabledText: "#0f766e",
-    disabledBg: "#fff7ed",
-    disabledBorder: "#f59e0b",
-    disabledText: "#c2410c",
-    statusOk: "#16a34a",
-    statusWarn: "#d97706",
-    statusErr: "#dc2626",
-    shadow: "0 6px 24px rgba(0,0,0,0.08)"
+    enabled: true,
+    mode: "venv",
+    protocol: "http",
+    host: "localhost",
+    port: 18080,
+    health_path: "/health",
+    env: {
+      API_HOST: "localhost",
+      API_PORT: "18080",
+      CORS_ALLOW_ANY: "1",
+      AUTH_METHOD: "api_key",
+      AUTH_API_KEY: "",
+      JWT_SECRET: "",
+    },
   };
+};
+
+const defaultSettings = (): SettingsValue => ({
+  document_chat: defaultServiceSettings("document_chat"),
+  document_processing: defaultServiceSettings("document_processing"),
+  full_install: false,
+});
+
+function buildHealthUrl(settings: ServiceSettings): string {
+  const healthPath = settings.health_path?.startsWith("/") ? settings.health_path : `/${settings.health_path || "health"}`;
+  return `${settings.protocol || "http"}://${settings.host || "localhost"}:${settings.port || 0}${healthPath}`;
 }
 
-function pillStyle(palette: Palette): React.CSSProperties {
+function mergeServiceSettings(base: ServiceSettings, incoming?: Partial<ServiceSettings>): ServiceSettings {
+  if (!incoming) return base;
+  const merged: ServiceSettings = {
+    ...base,
+    ...incoming,
+    env: { ...base.env, ...(incoming.env || {}) },
+  };
+  merged.health_path = merged.health_path?.startsWith("/") ? merged.health_path : `/${merged.health_path || "health"}`;
+  merged.port = Number.isFinite(Number(merged.port)) ? Number(merged.port) : base.port;
+  return merged;
+}
+
+function mergeSettings(loaded?: any): SettingsValue {
+  const base = defaultSettings();
+  if (!loaded || typeof loaded !== "object") return base;
+  const incomingChat = (loaded as any).document_chat;
+  const incomingProc = (loaded as any).document_processing;
+
   return {
-    display: "inline-flex",
-    alignItems: "center",
-    padding: "4px 8px",
-    borderRadius: "12px",
-    fontSize: "12px",
-    fontWeight: 600,
-    background: palette.pillBg,
-    color: palette.pillText,
-    border: `1px solid ${palette.pillBorder}`,
-    textTransform: "uppercase",
-    letterSpacing: "0.4px"
+    document_chat: mergeServiceSettings(base.document_chat, incomingChat || {}),
+    document_processing: mergeServiceSettings(base.document_processing, incomingProc || {}),
+    full_install: Boolean((loaded as any).full_install || false),
   };
 }
 
-function cardStyle(palette: Palette): React.CSSProperties {
-  return {
-    border: `1px solid ${palette.cardBorder}`,
-    borderRadius: "12px",
-    padding: "14px 16px",
-    background: palette.card,
-    boxShadow: palette.shadow,
-    display: "grid",
-    gap: "12px"
+function buildEnvPayload(settings: SettingsValue): Record<string, Record<string, string>> {
+  const envPayload: Record<string, Record<string, string>> = {};
+  const chat = settings.document_chat;
+  const proc = settings.document_processing;
+
+  const procUrl = `${proc.protocol}://${proc.host}:${proc.port}/documents/`;
+  envPayload.document_chat = {
+    API_HOST: chat.host,
+    API_PORT: String(chat.port),
+    DOCUMENT_PROCESSOR_API_URL: chat.env.DOCUMENT_PROCESSOR_API_URL || procUrl,
+    LLM_PROVIDER: chat.env.LLM_PROVIDER || "ollama",
+    EMBEDDING_PROVIDER: chat.env.EMBEDDING_PROVIDER || "ollama",
+    OLLAMA_LLM_BASE_URL: chat.env.OLLAMA_LLM_BASE_URL || "",
+    OLLAMA_LLM_MODEL: chat.env.OLLAMA_LLM_MODEL || "",
+    OLLAMA_EMBEDDING_BASE_URL: chat.env.OLLAMA_EMBEDDING_BASE_URL || "",
+    OLLAMA_EMBEDDING_MODEL: chat.env.OLLAMA_EMBEDDING_MODEL || "",
+    ENABLE_CONTEXTUAL_RETRIEVAL: chat.env.ENABLE_CONTEXTUAL_RETRIEVAL || "false",
+    OLLAMA_CONTEXTUAL_LLM_BASE_URL: chat.env.OLLAMA_CONTEXTUAL_LLM_BASE_URL || "",
+    OLLAMA_CONTEXTUAL_LLM_MODEL: chat.env.OLLAMA_CONTEXTUAL_LLM_MODEL || "",
+    EVALUATION_PROVIDER: chat.env.EVALUATION_PROVIDER || "openai",
+    OPENAI_EVALUATION_API_KEY: chat.env.OPENAI_EVALUATION_API_KEY || "",
+    OPENAI_EVALUATION_MODEL: chat.env.OPENAI_EVALUATION_MODEL || "",
   };
+
+  envPayload.document_processing = {
+    API_HOST: proc.host,
+    API_PORT: String(proc.port),
+    CORS_ALLOW_ANY: proc.env.CORS_ALLOW_ANY || "1",
+    AUTH_METHOD: proc.env.AUTH_METHOD || "api_key",
+    AUTH_API_KEY: proc.env.AUTH_API_KEY || "",
+    JWT_SECRET: proc.env.JWT_SECRET || "",
+  };
+
+  return envPayload;
 }
 
-function ServiceCard({
-  config,
-  state,
-  onToggle,
-  onStart,
-  onStop,
-  onRestart,
-  onHealthCheck,
-  palette
-}: {
-  config: ServiceConfig;
-  state: ToggleState;
-  onToggle: (next: boolean) => void;
-  onStart: () => void;
-  onStop: () => void;
-  onRestart: () => void;
-  onHealthCheck: () => void;
-  palette: Palette;
-}) {
-  const statusColor =
-    state.status === "running"
-      ? palette.statusOk
-      : state.status === "stopped"
-        ? palette.statusWarn
-        : state.status === "error"
-          ? palette.statusErr
-          : palette.muted;
+type AccordionProps = {
+  title: string;
+  id: string;
+  open: boolean;
+  onToggle: (id: string) => void;
+  children?: React.ReactNode;
+};
 
+const Accordion = ({ title, id, open, onToggle, children }: AccordionProps) => {
   return (
-    <div style={cardStyle(palette)}>
-      <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
-        <div>
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            <span style={{ fontSize: 16, fontWeight: 700, color: palette.text }}>{config.label}</span>
-            <span style={{
-              ...pillStyle(palette),
-              background: state.status === "running" ? palette.enabledBg : state.status === "error" ? palette.disabledBg : palette.disabledBg,
-              borderColor: statusColor,
-              color: statusColor
-            }}>
-              {state.status === "running" ? "Running" : state.status === "stopped" ? "Stopped" : state.status === "error" ? "Error" : "Unknown"}
-            </span>
-          </div>
-          <p style={{ margin: "6px 0 0 0", color: palette.muted }}>
-            {state.lastMessage || config.description}
-          </p>
-        </div>
-      </div>
+    <details
+      open={open}
+      onToggle={() => onToggle(id)}
+      className="rag-accordion"
+    >
+      <summary>{title}</summary>
+      <div className="rag-accordion-content">{children}</div>
+    </details>
+  );
+};
 
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center" }}>
-        <button type="button" onClick={onStart} style={buttonStyle(false, palette)}>
-          Start
-        </button>
-        <button type="button" onClick={onStop} style={buttonStyle(false, palette)}>
-          Stop
-        </button>
-        <button type="button" onClick={onRestart} style={buttonStyle(false, palette)}>
-          Restart
-        </button>
-        <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
-          <span style={{ color: palette.muted, fontSize: 12 }}>Default port: {config.defaultPort}</span>
-          <button type="button" onClick={onHealthCheck} style={buttonStyle(false, palette)}>
-            Check status
-          </button>
-        </div>
-      </div>
-    </div>
+function Field({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <label className="rag-field">
+      <span>{label}</span>
+      {children}
+    </label>
   );
 }
 
-function buttonStyle(active: boolean, palette: Palette): React.CSSProperties {
-  return {
-    padding: "8px 12px",
-    borderRadius: "10px",
-    border: active ? `1px solid ${palette.activeBorder}` : `1px solid ${palette.cardBorder}`,
-    background: active ? palette.activeBg : palette.card,
-    color: active ? palette.activeText : palette.text,
-    cursor: "pointer",
-    fontWeight: 600
-  };
-}
-
-class BrainDriveRAGSettings extends React.Component<PanelProps, PanelState> {
-  private themeListener?: (theme: string) => void;
-
+class BrainDriveRAGSettings extends React.Component<PanelProps, State> {
   constructor(props: PanelProps) {
     super(props);
     this.state = {
-      toggles: this.buildDefaults(props.initialState),
-      healthMessages: {
-        documentChat: "",
-        documentProcessing: ""
+      settings: defaultSettings(),
+      loading: true,
+      saving: false,
+      error: undefined,
+      success: undefined,
+      health: {
+        document_chat: "",
+        document_processing: ""
       },
-      currentTheme: "light"
+      accordions: {
+        connectivity_chat: false,
+        connectivity_processing: false,
+        llm: false,
+        embedding: false,
+        contextual: false,
+        evaluation: false,
+        processing_env: false,
+      },
+  currentTheme: "light",
     };
   }
 
-  componentDidMount() {
+  componentDidMount(): void {
+    this.initializeThemeService();
+    void this.loadSettings();
+  }
+
+  componentWillUnmount(): void {
     const themeSvc = this.props.services?.theme;
+    if (themeSvc?.removeThemeChangeListener) {
+      themeSvc.removeThemeChangeListener(this.handleThemeChange);
+    }
+  }
+
+  initializeThemeService() {
+    const ambient = detectAmbientTheme();
+    const themeSvc = this.props.services?.theme;
+    let resolvedTheme = ambient || "light";
+
     if (themeSvc?.getCurrentTheme) {
-      const current = themeSvc.getCurrentTheme();
-      this.setState({ currentTheme: current });
+      try {
+        resolvedTheme = themeSvc.getCurrentTheme() || resolvedTheme;
+      } catch (err) {
+        console.warn("BrainDriveRAGSettings: unable to read theme from service", err);
+      }
     }
+
+    this.setState({ currentTheme: resolvedTheme });
+
     if (themeSvc?.addThemeChangeListener) {
-      this.themeListener = (theme) => this.setState({ currentTheme: theme || "light" });
-      themeSvc.addThemeChangeListener(this.themeListener);
+      try {
+        themeSvc.addThemeChangeListener(this.handleThemeChange);
+      } catch (err) {
+        console.warn("BrainDriveRAGSettings: unable to attach theme listener", err);
+      }
     }
   }
 
-  componentWillUnmount() {
-    const themeSvc = this.props.services?.theme;
-    if (themeSvc?.removeThemeChangeListener && this.themeListener) {
-      themeSvc.removeThemeChangeListener(this.themeListener);
-    }
-  }
+  handleThemeChange = (theme: string) => {
+    this.setState({ currentTheme: theme || "light" });
+  };
 
-  componentDidUpdate(prevProps: PanelProps) {
-    if (prevProps.initialState !== this.props.initialState) {
-      this.setState({ toggles: this.buildDefaults(this.props.initialState) });
-    }
-  }
-
-  private buildDefaults(initialState?: Partial<Record<ServiceKey, ToggleState>>): Record<ServiceKey, ToggleState> {
-    const initChatEnabled = (initialState as any)?.documentChat?.enabled ?? false;
-    const initProcEnabled = (initialState as any)?.documentProcessing?.enabled ?? false;
-    return {
-      documentChat: initialState?.documentChat
-        ? { status: initChatEnabled ? "running" : "stopped" }
-        : { status: initChatEnabled ? "running" : "unknown" },
-      documentProcessing: initialState?.documentProcessing
-        ? { status: initProcEnabled ? "running" : "stopped" }
-        : { status: initProcEnabled ? "running" : "unknown" }
-    };
-  }
-
-  private setHealth = (key: ServiceKey, msg: string) => {
+  setAccordion = (id: string) => {
     this.setState((prev) => ({
       ...prev,
-      healthMessages: { ...prev.healthMessages, [key]: msg },
-      toggles: {
-        ...prev.toggles,
-        [key]: {
-          ...prev.toggles[key],
-          status: msg.toLowerCase().includes("healthy") || msg.toLowerCase().includes("ok") ? "running" : prev.toggles[key].status === "running" ? "error" : "stopped",
-          lastMessage: msg
+      accordions: { ...prev.accordions, [id]: !prev.accordions[id] }
+    }));
+  };
+
+  setHealthMessage = (key: ServiceKey, message: string) => {
+    this.setState((prev) => ({
+      ...prev,
+      health: { ...prev.health, [key]: message }
+    }));
+  };
+
+  loadSettings = async () => {
+    this.setState((prev) => ({ ...prev, loading: true, error: undefined }));
+    const services = this.props.services;
+    try {
+      let loaded: any = null;
+      if (services?.api?.get) {
+        const params = new URLSearchParams({
+          definition_id: SETTINGS_DEFINITION_ID,
+          user_id: "current",
+          scope: "user",
+        }).toString();
+        const url = `/api/v1/settings/instances?${params}`;
+        const resp = await services.api.get(url);
+        if (Array.isArray(resp) && resp.length > 0) loaded = resp[0]?.value || resp[0];
+        else if (resp && typeof resp === "object") loaded = resp.value || resp;
+      } else if (services?.settings?.getSetting) {
+        loaded = await services.settings.getSetting(SETTINGS_DEFINITION_ID, { userId: "current" });
+      }
+      const merged = mergeSettings(loaded);
+      this.setState((prev) => ({ ...prev, settings: merged, loading: false }));
+    } catch (err: any) {
+      this.setState((prev) => ({ ...prev, loading: false, error: err?.message || "Failed to load settings" }));
+    }
+  };
+
+  persistSettings = async (nextSettings: SettingsValue): Promise<boolean> => {
+    const services = this.props.services;
+    try {
+      if (services?.api?.post) {
+        const payload = {
+          definition_id: SETTINGS_DEFINITION_ID,
+          value: nextSettings,
+          name: "RAG Services Settings",
+          scope: "user",
+          user_id: "current",
+        };
+        await services.api.post("/api/v1/settings/instances", payload);
+      } else if (services?.settings?.setSetting) {
+        await services.settings.setSetting(SETTINGS_DEFINITION_ID, nextSettings, { userId: "current" });
+      } else {
+        throw new Error("No API or settings service available");
+      }
+      return true;
+    } catch (err: any) {
+      this.setState((prev) => ({ ...prev, error: err?.message || "Failed to save settings" }));
+      return false;
+    }
+  };
+
+  saveSettings = async (restart: boolean, serviceKey?: ServiceKey | null) => {
+    this.setState((prev) => ({ ...prev, saving: true, error: undefined, success: undefined }));
+    const ok = await this.persistSettings(this.state.settings);
+    if (!ok) {
+      this.setState((prev) => ({ ...prev, saving: false }));
+      return;
+    }
+
+    if (restart) {
+      await this.controlService("restart", serviceKey ?? null);
+    }
+
+    this.setState((prev) => ({
+      ...prev,
+      saving: false,
+      success: restart ? "Saved and restart requested" : "Settings saved"
+    }));
+    setTimeout(() => this.setState((prev) => ({ ...prev, success: undefined })), 4000);
+  };
+
+  controlService = async (action: "start" | "stop" | "restart", serviceKey: ServiceKey | null) => {
+    const envPayload = buildEnvPayload(this.state.settings);
+    const services = this.props.services;
+    try {
+      if (services?.api?.post) {
+        const payload: Record<string, any> = {
+          definition_id: SETTINGS_DEFINITION_ID,
+          user_id: "current",
+          env: envPayload,
+          settings: this.state.settings,
+        };
+        if (serviceKey) payload.service_name = serviceKey;
+        const url = `/api/v1/plugins/${PLUGIN_SLUG}/services/${action}`;
+        await services.api.post(url, payload);
+      } else {
+        this.setState((prev) => ({ ...prev, error: "Control API not available" }));
+      }
+    } catch (err: any) {
+      this.setState((prev) => ({ ...prev, error: err?.message || `Failed to ${action} service` }));
+    }
+  };
+
+  handleHealthCheck = async (serviceKey: ServiceKey) => {
+    const settings = this.state.settings[serviceKey];
+    const url = buildHealthUrl(settings);
+    this.setHealthMessage(serviceKey, "checking...");
+    try {
+      const resp = await fetch(url, { method: "GET", credentials: "omit", mode: "cors" });
+      if (!resp.ok) {
+        this.setHealthMessage(serviceKey, `Unhealthy (${resp.status})`);
+        return;
+      }
+      const text = await resp.text();
+      this.setHealthMessage(serviceKey, text || "Healthy");
+    } catch (err: any) {
+      this.setHealthMessage(serviceKey, `Check failed: ${err?.message || err}`);
+    }
+  };
+
+  updateServiceField = (serviceKey: ServiceKey, field: keyof ServiceSettings, value: any) => {
+    this.setState((prev) => ({
+      ...prev,
+      settings: {
+        ...prev.settings,
+        [serviceKey]: {
+          ...prev.settings[serviceKey],
+          [field]: value
         }
       }
     }));
   };
 
-  private handleToggle = (key: ServiceKey, next: boolean) => {
+  updateEnvField = (serviceKey: ServiceKey, key: string, value: string) => {
     this.setState((prev) => ({
       ...prev,
-      toggles: { ...prev.toggles, [key]: { ...prev.toggles[key], status: next ? "running" : "stopped" } }
+      settings: {
+        ...prev.settings,
+        [serviceKey]: {
+          ...prev.settings[serviceKey],
+          env: { ...prev.settings[serviceKey].env, [key]: value }
+        }
+      }
     }));
   };
 
-  private handleHealthCheck = async (cfg: ServiceConfig) => {
-    const url = `http://localhost:${cfg.defaultPort}${cfg.healthPath}`;
-    try {
-      this.setHealth(cfg.key, "checking...");
-
-      const response = await fetch(url, { method: "GET", credentials: "omit", mode: "cors" });
-      if (!response.ok) {
-        this.setHealth(cfg.key, `Unhealthy (${response.status})`);
-        return;
-      }
-      const text = await response.text();
-      const formatted = formatHealthMessage(text);
-      this.setHealth(cfg.key, formatted || "Healthy");
-    } catch (error: any) {
-      this.setHealth(cfg.key, `Check failed: ${error?.message || error}`);
-    }
-  };
-
-  private callControl = async (cfg: ServiceConfig, action: "start" | "stop" | "restart") => {
-    // Control endpoints are not available; surface a message without calling the network.
-    this.setHealth(cfg.key, `${action} not supported in this build`);
-  };
-
-  render() {
-    const { title, subtitle } = this.props;
-    const { toggles, healthMessages, currentTheme } = this.state;
-    const palette = getPalette(currentTheme);
-
+  renderConnectivity = (serviceKey: ServiceKey) => {
+    const svc = this.state.settings[serviceKey];
+    const baseId = serviceKey === "document_chat" ? "connectivity_chat" : "connectivity_processing";
     return (
-      <div style={{ display: "grid", gap: 12 }}>
-        {SERVICE_CONFIG.map((cfg) => (
-          <div key={cfg.key} style={{ display: "grid", gap: 6 }}>
-            <ServiceCard
-              config={cfg}
-              state={toggles[cfg.key]}
-              onToggle={(next) => this.handleToggle(cfg.key, next)}
-              onStart={() => this.callControl(cfg, "start")}
-              onStop={() => this.callControl(cfg, "stop")}
-              onRestart={() => this.callControl(cfg, "restart")}
-              onHealthCheck={() => this.handleHealthCheck(cfg)}
-              palette={palette}
-            />
+      <Accordion title="Connectivity" id={baseId} open={this.state.accordions[baseId]} onToggle={this.setAccordion}>
+        <div className="rag-grid rag-grid--compact">
+          <Field label="Protocol">
+            <select className="rag-select" value={svc.protocol} onChange={(e) => this.updateServiceField(serviceKey, "protocol", e.target.value as any)}>
+              <option value="http">http</option>
+              <option value="https">https</option>
+            </select>
+          </Field>
+          <Field label="Host">
+            <input className="rag-input" value={svc.host} onChange={(e) => this.updateServiceField(serviceKey, "host", e.target.value)} />
+          </Field>
+          <Field label="Port">
+            <input className="rag-input" type="number" value={svc.port} onChange={(e) => this.updateServiceField(serviceKey, "port", Number(e.target.value))} />
+          </Field>
+          <Field label="Health path">
+            <input className="rag-input" value={svc.health_path} onChange={(e) => this.updateServiceField(serviceKey, "health_path", e.target.value)} />
+          </Field>
+        </div>
+        <div className="rag-help">Health URL: {buildHealthUrl(svc)}</div>
+      </Accordion>
+    );
+  };
+
+  renderRuntime = () => {
+    const chat = this.state.settings.document_chat;
+    const contextualEnabled = String(chat.env.ENABLE_CONTEXTUAL_RETRIEVAL).toLowerCase() === "true";
+    return (
+      <>
+        <Accordion title="LLM Provider" id="llm" open={this.state.accordions.llm} onToggle={this.setAccordion}>
+          <Field label="Provider">
+            <select className="rag-select" value={chat.env.LLM_PROVIDER} onChange={(e) => this.updateEnvField("document_chat", "LLM_PROVIDER", e.target.value)}>
+              <option value="ollama">ollama</option>
+              <option value="openai">openai</option>
+              <option value="groq">groq</option>
+              <option value="openrouter">openrouter</option>
+            </select>
+          </Field>
+          <div className="rag-grid rag-grid--wide">
+            <Field label="Base URL">
+              <input className="rag-input" value={chat.env.OLLAMA_LLM_BASE_URL} onChange={(e) => this.updateEnvField("document_chat", "OLLAMA_LLM_BASE_URL", e.target.value)} />
+            </Field>
+            <Field label="Model">
+              <input className="rag-input" value={chat.env.OLLAMA_LLM_MODEL} onChange={(e) => this.updateEnvField("document_chat", "OLLAMA_LLM_MODEL", e.target.value)} />
+            </Field>
           </div>
-        ))}
+        </Accordion>
+
+        <Accordion title="Embedding Provider" id="embedding" open={this.state.accordions.embedding} onToggle={this.setAccordion}>
+          <Field label="Provider">
+            <select className="rag-select" value={chat.env.EMBEDDING_PROVIDER} onChange={(e) => this.updateEnvField("document_chat", "EMBEDDING_PROVIDER", e.target.value)}>
+              <option value="ollama">ollama</option>
+              <option value="openai">openai</option>
+            </select>
+          </Field>
+          <div className="rag-grid rag-grid--wide">
+            <Field label="Base URL">
+              <input className="rag-input" value={chat.env.OLLAMA_EMBEDDING_BASE_URL} onChange={(e) => this.updateEnvField("document_chat", "OLLAMA_EMBEDDING_BASE_URL", e.target.value)} />
+            </Field>
+            <Field label="Model">
+              <input className="rag-input" value={chat.env.OLLAMA_EMBEDDING_MODEL} onChange={(e) => this.updateEnvField("document_chat", "OLLAMA_EMBEDDING_MODEL", e.target.value)} />
+            </Field>
+          </div>
+        </Accordion>
+
+        <Accordion title="Contextual Retrieval" id="contextual" open={this.state.accordions.contextual} onToggle={this.setAccordion}>
+          <label className="rag-checkbox-row">
+            <input type="checkbox" checked={contextualEnabled} onChange={(e) => this.updateEnvField("document_chat", "ENABLE_CONTEXTUAL_RETRIEVAL", e.target.checked ? "true" : "false")} />
+            Enable contextual retrieval
+          </label>
+          <div className="rag-grid rag-grid--wide">
+            <Field label="Base URL">
+              <input className="rag-input" value={chat.env.OLLAMA_CONTEXTUAL_LLM_BASE_URL} onChange={(e) => this.updateEnvField("document_chat", "OLLAMA_CONTEXTUAL_LLM_BASE_URL", e.target.value)} />
+            </Field>
+            <Field label="Model">
+              <input className="rag-input" value={chat.env.OLLAMA_CONTEXTUAL_LLM_MODEL} onChange={(e) => this.updateEnvField("document_chat", "OLLAMA_CONTEXTUAL_LLM_MODEL", e.target.value)} />
+            </Field>
+          </div>
+        </Accordion>
+
+        <Accordion title="Evaluation Settings" id="evaluation" open={this.state.accordions.evaluation} onToggle={this.setAccordion}>
+          <Field label="Provider">
+            <select className="rag-select" value={chat.env.EVALUATION_PROVIDER} onChange={(e) => this.updateEnvField("document_chat", "EVALUATION_PROVIDER", e.target.value)}>
+              <option value="openai">openai</option>
+              <option value="ollama">ollama</option>
+              <option value="groq">groq</option>
+            </select>
+          </Field>
+          <div className="rag-grid rag-grid--wide">
+            <Field label="API Key">
+              <input className="rag-input" type="password" value={chat.env.OPENAI_EVALUATION_API_KEY} onChange={(e) => this.updateEnvField("document_chat", "OPENAI_EVALUATION_API_KEY", e.target.value)} />
+            </Field>
+            <Field label="Model">
+              <input className="rag-input" value={chat.env.OPENAI_EVALUATION_MODEL} onChange={(e) => this.updateEnvField("document_chat", "OPENAI_EVALUATION_MODEL", e.target.value)} />
+            </Field>
+          </div>
+        </Accordion>
+      </>
+    );
+  };
+
+  renderProcessingEnv = () => {
+    const proc = this.state.settings.document_processing;
+    return (
+      <Accordion title="Processing Auth & CORS" id="processing_env" open={this.state.accordions.processing_env} onToggle={this.setAccordion}>
+        <div className="rag-grid rag-grid--wide">
+          <Field label="CORS allow any (1/0)">
+            <input className="rag-input" value={proc.env.CORS_ALLOW_ANY} onChange={(e) => this.updateEnvField("document_processing", "CORS_ALLOW_ANY", e.target.value)} />
+          </Field>
+          <Field label="Auth method">
+            <input className="rag-input" value={proc.env.AUTH_METHOD} onChange={(e) => this.updateEnvField("document_processing", "AUTH_METHOD", e.target.value)} />
+          </Field>
+          <Field label="Auth API Key">
+            <input className="rag-input" value={proc.env.AUTH_API_KEY} onChange={(e) => this.updateEnvField("document_processing", "AUTH_API_KEY", e.target.value)} />
+          </Field>
+          <Field label="JWT Secret">
+            <input className="rag-input" value={proc.env.JWT_SECRET} onChange={(e) => this.updateEnvField("document_processing", "JWT_SECRET", e.target.value)} />
+          </Field>
+        </div>
+      </Accordion>
+    );
+  };
+
+  renderServiceCard = (serviceKey: ServiceKey, title: string, description: string) => {
+    const svc = this.state.settings[serviceKey];
+    const healthMessage = this.state.health[serviceKey];
+    return (
+      <div className="rag-card">
+        <div className="rag-card-header">
+          <div>
+            <div className="rag-card-title">{title}</div>
+            <div className="rag-card-description">{description}</div>
+          </div>
+          <div className="rag-meta">
+            <label className="rag-checkbox-row">
+              <input type="checkbox" checked={svc.enabled} onChange={(e) => this.updateServiceField(serviceKey, "enabled", e.target.checked)} />
+              Enabled
+            </label>
+            <div>Mode: {svc.mode || "venv"}</div>
+          </div>
+        </div>
+
+        <div className="rag-actions">
+          <button onClick={() => this.saveSettings(false)} disabled={this.state.saving || this.state.loading} className="rag-button rag-button--primary">{this.state.saving ? "Saving..." : "Save"}</button>
+          <button onClick={() => this.saveSettings(true, serviceKey)} disabled={this.state.saving || this.state.loading} className="rag-button rag-button--primary">Save & Restart</button>
+          <button onClick={() => this.controlService("start", serviceKey)} className="rag-button">Start</button>
+          <button onClick={() => this.controlService("stop", serviceKey)} className="rag-button">Stop</button>
+          <button onClick={() => this.controlService("restart", serviceKey)} className="rag-button">Restart</button>
+          <button onClick={() => this.handleHealthCheck(serviceKey)} className="rag-button">Health</button>
+          <span className="rag-health">{healthMessage}</span>
+        </div>
+
+        <div className="rag-section-stack">
+          {this.renderConnectivity(serviceKey)}
+          {serviceKey === "document_chat" ? this.renderRuntime() : this.renderProcessingEnv()}
+        </div>
+      </div>
+    );
+  };
+
+  render(): React.ReactNode {
+    const rootClass = this.state.currentTheme.toLowerCase().includes("dark") ? "dark-theme" : "";
+    return (
+      <div className={`rag-settings ${rootClass}`}>
+        {this.state.error && <div className="rag-banner rag-banner--error">{this.state.error}</div>}
+        {this.state.success && <div className="rag-banner rag-banner--success">{this.state.success}</div>}
+        {this.state.loading ? (
+          <div>Loading settings...</div>
+        ) : (
+          <>
+            {this.renderServiceCard("document_chat", "Document Chat Service", "User-facing chat API serving retrieved answers.")}
+            {this.renderServiceCard("document_processing", "Document Processing Service", "Ingests and chunks documents for retrieval.")}
+          </>
+        )}
       </div>
     );
   }
@@ -378,21 +612,18 @@ class BrainDriveRAGSettings extends React.Component<PanelProps, PanelState> {
 export default BrainDriveRAGSettings;
 export { BrainDriveRAGSettings };
 
-function formatHealthMessage(raw: string): string {
-  const trimmed = (raw || "").trim();
-  if (!trimmed) return "";
+function detectAmbientTheme(): string | null {
   try {
-    const parsed = JSON.parse(trimmed);
-    if (parsed && typeof parsed === "object") {
-      if (typeof parsed.status === "string") {
-        return parsed.version ? `${parsed.status} (${parsed.version})` : parsed.status;
-      }
-      return Object.entries(parsed)
-        .map(([k, v]) => `${k}: ${String(v)}`)
-        .join(", ");
-    }
+    if (typeof document === "undefined") return null;
+    const root = document.documentElement;
+    const body = document.body;
+    const hasDarkClass =
+      root.classList.contains("dark") ||
+      root.classList.contains("dark-theme") ||
+      body.classList.contains("dark") ||
+      body.classList.contains("dark-theme");
+    return hasDarkClass ? "dark" : null;
   } catch {
-    // not JSON
+    return null;
   }
-  return trimmed;
 }

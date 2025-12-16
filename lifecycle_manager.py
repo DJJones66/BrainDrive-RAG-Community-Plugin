@@ -12,6 +12,7 @@ import importlib.util
 import json
 import os
 import uuid
+from copy import deepcopy
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 
@@ -46,8 +47,148 @@ get_service_metadata = service_ops_module.get_service_metadata
 get_required_env_vars_map = service_ops_module.get_required_env_vars_map
 materialize_env_file = service_ops_module.materialize_env_file
 update_env_and_restart = service_ops_module.update_env_and_restart
+update_health_urls = getattr(service_ops_module, "update_health_urls", None)
+_parse_env_template = getattr(service_ops_module, "_parse_env_template", None)
+_template_candidates = getattr(service_ops_module, "_template_candidates", None)
+SERVICE_CONFIG = getattr(service_ops_module, "SERVICE_CONFIG", {})
 
 logger = structlog.get_logger()
+
+# Curated env keys that map to runtime settings (avoid exposing every env)
+DOC_CHAT_ENV_KEYS: List[str] = [
+  "API_HOST",
+  "API_PORT",
+  "DOCUMENT_PROCESSOR_API_URL",
+  "LLM_PROVIDER",
+  "EMBEDDING_PROVIDER",
+  "OLLAMA_LLM_BASE_URL",
+  "OLLAMA_LLM_MODEL",
+  "OLLAMA_EMBEDDING_BASE_URL",
+  "OLLAMA_EMBEDDING_MODEL",
+  "ENABLE_CONTEXTUAL_RETRIEVAL",
+  "OLLAMA_CONTEXTUAL_LLM_BASE_URL",
+  "OLLAMA_CONTEXTUAL_LLM_MODEL",
+  "EVALUATION_PROVIDER",
+  "OPENAI_EVALUATION_API_KEY",
+  "OPENAI_EVALUATION_MODEL",
+]
+
+DOC_PROCESSING_ENV_KEYS: List[str] = [
+  "API_HOST",
+  "API_PORT",
+  "CORS_ALLOW_ANY",
+  "AUTH_METHOD",
+  "AUTH_API_KEY",
+  "JWT_SECRET",
+]
+
+
+def _coerce_int(value: Any, default: int) -> int:
+  try:
+    return int(value)
+  except Exception:
+    return default
+
+
+def _normalize_service_settings(raw: Dict[str, Any], fallback_port: int) -> Dict[str, Any]:
+  """Ensure required fields exist and derive base/health URLs."""
+  data = deepcopy(raw) if raw else {}
+  protocol = (data.get("protocol") or "http").lower()
+  host = data.get("host") or "localhost"
+  port = _coerce_int(data.get("port"), fallback_port)
+  health_path = data.get("health_path") or "/health"
+  if not str(health_path).startswith("/"):
+    health_path = f"/{health_path}"
+  data.update({
+    "protocol": protocol,
+    "host": host,
+    "port": port,
+    "health_path": health_path,
+    "base_url": f"{protocol}://{host}:{port}",
+    "health_url": f"{protocol}://{host}:{port}{health_path}",
+    "env": data.get("env") or {},
+  })
+  return data
+
+
+def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+  """Recursively merge dictionaries (override wins)."""
+  result: Dict[str, Any] = deepcopy(base)
+  for key, value in (override or {}).items():
+    if isinstance(value, dict) and isinstance(result.get(key), dict):
+      result[key] = _deep_merge(result[key], value)
+    else:
+      result[key] = value
+  return result
+
+
+def _build_service_defaults(service_key: str) -> Dict[str, Any]:
+  """Seed defaults from env templates (when available) plus sensible fallbacks."""
+  defaults: Dict[str, Any] = {}
+  if service_key == "document_chat":
+    defaults = {
+      "enabled": True,
+      "mode": SERVICE_CONFIG.get(service_key).default_mode if SERVICE_CONFIG.get(service_key) else "venv",
+      "protocol": "http",
+      "host": "localhost",
+      "port": 18000,
+      "health_path": "/health",
+      "env": {}
+    }
+  else:
+    defaults = {
+      "enabled": True,
+      "mode": SERVICE_CONFIG.get(service_key).default_mode if SERVICE_CONFIG.get(service_key) else "venv",
+      "protocol": "http",
+      "host": "localhost",
+      "port": 18080,
+      "health_path": "/health",
+      "env": {}
+    }
+
+  if _parse_env_template and _template_candidates and service_key in SERVICE_CONFIG:
+    template_keys: List[str] = []
+    parsed_defaults: Dict[str, str] = {}
+    for candidate in _template_candidates(SERVICE_CONFIG[service_key]):
+      keys, values = _parse_env_template(candidate)
+      if keys:
+        template_keys.extend(keys)
+      if values:
+        parsed_defaults.update(values)
+
+    # Connectivity from template if present
+    defaults["host"] = parsed_defaults.get("API_HOST", defaults["host"])
+    defaults["port"] = _coerce_int(parsed_defaults.get("API_PORT"), defaults["port"])
+
+    if service_key == "document_chat":
+      defaults["env"] = {
+        "API_HOST": defaults["host"],
+        "API_PORT": str(defaults["port"]),
+        "DOCUMENT_PROCESSOR_API_URL": parsed_defaults.get("DOCUMENT_PROCESSOR_API_URL", f"http://localhost:18080/documents/"),
+        "LLM_PROVIDER": parsed_defaults.get("LLM_PROVIDER", "ollama"),
+        "EMBEDDING_PROVIDER": parsed_defaults.get("EMBEDDING_PROVIDER", "ollama"),
+        "OLLAMA_LLM_BASE_URL": parsed_defaults.get("OLLAMA_LLM_BASE_URL", ""),
+        "OLLAMA_LLM_MODEL": parsed_defaults.get("OLLAMA_LLM_MODEL", ""),
+        "OLLAMA_EMBEDDING_BASE_URL": parsed_defaults.get("OLLAMA_EMBEDDING_BASE_URL", ""),
+        "OLLAMA_EMBEDDING_MODEL": parsed_defaults.get("OLLAMA_EMBEDDING_MODEL", ""),
+        "ENABLE_CONTEXTUAL_RETRIEVAL": parsed_defaults.get("ENABLE_CONTEXTUAL_RETRIEVAL", "false"),
+        "OLLAMA_CONTEXTUAL_LLM_BASE_URL": parsed_defaults.get("OLLAMA_CONTEXTUAL_LLM_BASE_URL", ""),
+        "OLLAMA_CONTEXTUAL_LLM_MODEL": parsed_defaults.get("OLLAMA_CONTEXTUAL_LLM_MODEL", ""),
+        "EVALUATION_PROVIDER": parsed_defaults.get("EVALUATION_PROVIDER", "openai"),
+        "OPENAI_EVALUATION_API_KEY": parsed_defaults.get("OPENAI_EVALUATION_API_KEY", ""),
+        "OPENAI_EVALUATION_MODEL": parsed_defaults.get("OPENAI_EVALUATION_MODEL", ""),
+      }
+    else:
+      defaults["env"] = {
+        "API_HOST": defaults["host"],
+        "API_PORT": str(defaults["port"]),
+        "CORS_ALLOW_ANY": parsed_defaults.get("CORS_ALLOW_ANY", "1"),
+        "AUTH_METHOD": parsed_defaults.get("AUTH_METHOD", "api_key"),
+        "AUTH_API_KEY": parsed_defaults.get("AUTH_API_KEY", ""),
+        "JWT_SECRET": parsed_defaults.get("JWT_SECRET", ""),
+      }
+
+  return _normalize_service_settings(defaults, defaults.get("port", 0))
 
 PLUGIN_DATA: Dict[str, Any] = {
   "name": "BrainDrive-RAG-Community-Plugin",
@@ -121,7 +262,13 @@ class BrainDriveRAGCommunityLifecycleManager(CommunityPluginLifecycleBase):
     self.module_data = MODULE_DATA
     self.settings_definition_id = SETTINGS_DEFINITION_ID
     self.plugins_base_dir = plugins_base_dir
+    self.default_settings = {
+      "document_chat": _build_service_defaults("document_chat"),
+      "document_processing": _build_service_defaults("document_processing"),
+    }
     self.set_plugin_root(Path(__file__).resolve().parent)
+    chat_defaults = self.default_settings["document_chat"]
+    proc_defaults = self.default_settings["document_processing"]
     self.required_services_runtime = [
       {
         "name": "document_chat",
@@ -129,7 +276,7 @@ class BrainDriveRAGCommunityLifecycleManager(CommunityPluginLifecycleBase):
         "type": "venv_process",
         "install_command": "python3.11 service_scripts/install_with_venv.py --full",
         "start_command": "python3.11 service_scripts/start_with_venv.py",
-        "healthcheck_url": "http://localhost:18000/health",
+        "healthcheck_url": chat_defaults.get("health_url", "http://localhost:18000/health"),
         "definition_id": SETTINGS_DEFINITION_ID,
         "required_env_vars": []
       },
@@ -139,7 +286,7 @@ class BrainDriveRAGCommunityLifecycleManager(CommunityPluginLifecycleBase):
         "type": "venv_process",
         "install_command": "python3.11 service_scripts/install_with_venv.py --full",
         "start_command": "python3.11 service_scripts/start_with_venv.py",
-        "healthcheck_url": "http://localhost:18080/health",
+        "healthcheck_url": proc_defaults.get("health_url", "http://localhost:18080/health"),
         "definition_id": SETTINGS_DEFINITION_ID,
         "required_env_vars": []
       }
@@ -169,6 +316,65 @@ class BrainDriveRAGCommunityLifecycleManager(CommunityPluginLifecycleBase):
       name = service.get("name")
       service["required_env_vars"] = env_map.get(name, service.get("required_env_vars", []))
 
+  def _refresh_required_services_runtime_from_settings(self, settings_value: Dict[str, Any]) -> None:
+    """
+    Update runtime healthcheck URLs from settings (per-user/per-instance).
+    """
+    if not settings_value:
+      return
+    overrides: Dict[str, str] = {}
+    for service in self.required_services_runtime:
+      name = service.get("name")
+      svc_settings = settings_value.get(name) or settings_value.get(name.replace("document_", "document_"))
+      if svc_settings and isinstance(svc_settings, dict):
+        normalized = _normalize_service_settings(
+          svc_settings,
+          svc_settings.get("port", 0) or (18000 if name == "document_chat" else 18080)
+        )
+        service["healthcheck_url"] = normalized.get("health_url", service.get("healthcheck_url"))
+        overrides[name] = service["healthcheck_url"]
+    if update_health_urls and overrides:
+      try:
+        update_health_urls(overrides)
+      except Exception:
+        # Safe fallback: do not let a health URL override crash lifecycle init
+        pass
+
+  def _stringify_env_value(self, value: Any) -> str:
+    if isinstance(value, bool):
+      return "true" if value else "false"
+    return "" if value is None else str(value)
+
+  def _build_env_payload_from_settings(self, settings_value: Dict[str, Any]) -> Dict[str, Dict[str, str]]:
+    """
+    Build curated env payloads for services based on saved settings.
+    """
+    env_payload: Dict[str, Dict[str, str]] = {}
+    chat_settings = settings_value.get("document_chat", {})
+    proc_settings = settings_value.get("document_processing", {})
+
+    if chat_settings:
+      chat_norm = _normalize_service_settings(chat_settings, _coerce_int(chat_settings.get("port"), 18000))
+      proc_norm = _normalize_service_settings(proc_settings, _coerce_int(proc_settings.get("port"), 18080)) if proc_settings else {"host": "localhost", "port": 18080, "protocol": "http"}
+      chat_env = deepcopy(chat_norm.get("env") or {})
+      chat_env.update({
+        "API_HOST": chat_norm.get("host"),
+        "API_PORT": str(chat_norm.get("port")),
+        "DOCUMENT_PROCESSOR_API_URL": chat_env.get("DOCUMENT_PROCESSOR_API_URL") or f"{proc_norm.get('protocol','http')}://{proc_norm.get('host','localhost')}:{proc_norm.get('port',18080)}/documents/",
+      })
+      env_payload["document_chat"] = {k: self._stringify_env_value(v) for k, v in chat_env.items() if k in DOC_CHAT_ENV_KEYS}
+
+    if proc_settings:
+      proc_norm = _normalize_service_settings(proc_settings, _coerce_int(proc_settings.get("port"), 18080))
+      proc_env = deepcopy(proc_norm.get("env") or {})
+      proc_env.update({
+        "API_HOST": proc_norm.get("host"),
+        "API_PORT": str(proc_norm.get("port")),
+      })
+      env_payload["document_processing"] = {k: self._stringify_env_value(v) for k, v in proc_env.items() if k in DOC_PROCESSING_ENV_KEYS}
+
+    return env_payload
+
   # ---------------------------------------------------------------------------
   # Install / uninstall / update
   # ---------------------------------------------------------------------------
@@ -184,14 +390,18 @@ class BrainDriveRAGCommunityLifecycleManager(CommunityPluginLifecycleBase):
         return records
 
       settings_result = await self._ensure_settings(user_id, db)
+      settings_value = settings_result.get("value") or await self._load_settings_value(user_id, db)
+      if settings_value:
+        self._refresh_required_services_runtime_from_settings(settings_value)
       service_installs = await self._prepare_services(user_id)
-      health = await self._collect_service_health()
+      health = await self._collect_service_health(settings_value)
 
       return {
         "success": True,
         "plugin_id": records["plugin_id"],
         "modules_created": records["modules_created"],
         "settings": settings_result,
+        "settings_value": settings_value,
         "service_installs": service_installs,
         "service_health": health,
         "service_metadata": get_service_metadata(),
@@ -223,9 +433,12 @@ class BrainDriveRAGCommunityLifecycleManager(CommunityPluginLifecycleBase):
     logger.info("RAG plugin update invoked; running service prep")
     env_map = get_required_env_vars_map()
     self._apply_required_env_vars(env_map)
+    settings_value = await self._load_settings_value(user_id, db)
+    if settings_value:
+      self._refresh_required_services_runtime_from_settings(settings_value)
     await self._refresh_required_env_vars_in_db(user_id, db, env_map)
     installs = await self._prepare_services(user_id)
-    return {"success": True, "service_installs": installs, "required_env_vars": env_map}
+    return {"success": True, "service_installs": installs, "required_env_vars": env_map, "settings_value": settings_value}
 
   # ---------------------------------------------------------------------------
   # Database helpers
@@ -405,6 +618,24 @@ class BrainDriveRAGCommunityLifecycleManager(CommunityPluginLifecycleBase):
   # Settings
   # ---------------------------------------------------------------------------
 
+  async def _load_settings_value(self, user_id: str, db: AsyncSession) -> Dict[str, Any]:
+    """
+    Fetch settings instance value for the user, returning dict or {}.
+    """
+    try:
+      result = await db.execute(
+        text("SELECT value FROM settings_instances WHERE definition_id = :definition_id AND user_id = :user_id"),
+        {"definition_id": self.settings_definition_id, "user_id": user_id}
+      )
+      raw_val = result.scalar_one_or_none()
+      if not raw_val:
+        return {}
+      if isinstance(raw_val, str):
+        return json.loads(raw_val)
+      return raw_val if isinstance(raw_val, dict) else {}
+    except Exception:
+      return {}
+
   def _maybe_encrypt(self, table: str, field: str, value: str) -> str:
     if not encryption_service:
       return value
@@ -418,13 +649,9 @@ class BrainDriveRAGCommunityLifecycleManager(CommunityPluginLifecycleBase):
     try:
       definition_id = self.settings_definition_id
       default_settings_value = {
-        "document_chat_enabled": True,
-        "document_chat_mode": "venv",
-        "document_chat_port": 18000,
-        "document_processing_enabled": True,
-        "document_processing_mode": "venv",
-        "document_processing_port": 18080,
-        "full_install": False
+        "document_chat": _build_service_defaults("document_chat"),
+        "document_processing": _build_service_defaults("document_processing"),
+        "full_install": False,
       }
 
       definition = await db.execute(
@@ -467,12 +694,53 @@ class BrainDriveRAGCommunityLifecycleManager(CommunityPluginLifecycleBase):
           }
         )
 
-      existing_instance = await db.execute(
-        text("SELECT id FROM settings_instances WHERE definition_id = :definition_id AND user_id = :user_id"),
+      existing_instance_row = await db.execute(
+        text("SELECT id, value FROM settings_instances WHERE definition_id = :definition_id AND user_id = :user_id"),
         {"definition_id": definition_id, "user_id": user_id}
       )
-      existing_instance = existing_instance.scalar_one_or_none()
+      row = existing_instance_row.fetchone()
+      existing_instance = row[0] if row else None
+      existing_value_raw = row[1] if row and len(row) > 1 else None
+      try:
+        existing_value = json.loads(existing_value_raw) if isinstance(existing_value_raw, str) else (existing_value_raw or {})
+      except Exception:
+        existing_value = {}
 
+      # Handle legacy flat fields -> new structure
+      legacy_chat = {
+        "enabled": existing_value.get("document_chat_enabled"),
+        "mode": existing_value.get("document_chat_mode"),
+        "port": existing_value.get("document_chat_port"),
+      }
+      legacy_proc = {
+        "enabled": existing_value.get("document_processing_enabled"),
+        "mode": existing_value.get("document_processing_mode"),
+        "port": existing_value.get("document_processing_port"),
+      }
+
+      merged_chat = _deep_merge(default_settings_value["document_chat"], existing_value.get("document_chat", {}))
+      merged_proc = _deep_merge(default_settings_value["document_processing"], existing_value.get("document_processing", {}))
+      if legacy_chat["enabled"] is not None:
+        merged_chat["enabled"] = bool(legacy_chat["enabled"])
+      if legacy_chat["mode"]:
+        merged_chat["mode"] = legacy_chat["mode"]
+      if legacy_chat["port"]:
+        merged_chat["port"] = legacy_chat["port"]
+
+      if legacy_proc["enabled"] is not None:
+        merged_proc["enabled"] = bool(legacy_proc["enabled"])
+      if legacy_proc["mode"]:
+        merged_proc["mode"] = legacy_proc["mode"]
+      if legacy_proc["port"]:
+        merged_proc["port"] = legacy_proc["port"]
+
+      merged_value = {
+        "document_chat": _normalize_service_settings(merged_chat, _coerce_int(merged_chat.get("port"), 18000)),
+        "document_processing": _normalize_service_settings(merged_proc, _coerce_int(merged_proc.get("port"), 18080)),
+        "full_install": bool(existing_value.get("full_install", False)),
+      }
+
+      self._refresh_required_services_runtime_from_settings(merged_value)
       instance_id = f"rag_services_settings_{user_id}"
       if not existing_instance:
         instance_data = {
@@ -481,7 +749,7 @@ class BrainDriveRAGCommunityLifecycleManager(CommunityPluginLifecycleBase):
           "definition_id": definition_id,
           "scope": "user",
           "user_id": user_id,
-          "value": json.dumps(default_settings_value),
+          "value": json.dumps(merged_value),
           "created_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
           "updated_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
@@ -498,14 +766,14 @@ class BrainDriveRAGCommunityLifecycleManager(CommunityPluginLifecycleBase):
         await db.execute(
           text("UPDATE settings_instances SET value = :val, updated_at = :updated WHERE id = :id"),
           {
-            "val": json.dumps(default_settings_value),
+            "val": json.dumps(merged_value),
             "updated": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "id": existing_instance
           }
         )
 
       await db.commit()
-      return {"success": True, "definition_id": definition_id, "instance_id": instance_id}
+      return {"success": True, "definition_id": definition_id, "instance_id": instance_id, "value": merged_value}
     except Exception as error:  # pragma: no cover
       await db.rollback()
       logger.error("Failed to create RAG settings", error=str(error))
@@ -594,17 +862,23 @@ class BrainDriveRAGCommunityLifecycleManager(CommunityPluginLifecycleBase):
       results.append({"service": key, **shut_result})
     return {"results": results}
 
-  async def _restart_services(self) -> Dict[str, Any]:
+  async def _restart_services(self, settings_value: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    if settings_value:
+      await self.apply_settings_env(settings_value, restart=False)
     results: List[Dict[str, Any]] = []
     for key in ("document_chat", "document_processing"):
       restart_result = await restart_service(key)
       results.append({"service": key, **restart_result})
     return {"results": results}
 
-  async def _collect_service_health(self) -> Dict[str, Any]:
+  async def _collect_service_health(self, settings_value: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    if settings_value:
+      self._refresh_required_services_runtime_from_settings(settings_value)
     health: List[Dict[str, Any]] = []
     for key in ("document_chat", "document_processing"):
-      status = await health_check(key)
+      svc_settings = (settings_value or {}).get(key, {})
+      url_override = svc_settings.get("health_url") if isinstance(svc_settings, dict) else None
+      status = await health_check(key, url_override)
       health.append({"service": key, **status})
     return {"results": health}
 
@@ -644,6 +918,27 @@ class BrainDriveRAGCommunityLifecycleManager(CommunityPluginLifecycleBase):
 
     success = all(item.get("changed", True) is not False for item in results) if results else True
     return {"success": success, "results": results}
+
+  async def apply_settings_env(self, settings_value: Dict[str, Any], restart: bool = True) -> Dict[str, Any]:
+    """
+    Convenience: build env payload from settings_value and apply to services.
+    """
+    env_payload = self._build_env_payload_from_settings(settings_value)
+    return await self.apply_env_updates(env_payload, restart=restart)
+
+  async def control_service_with_settings(self, action: str, service_key: str, settings_value: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """
+    Control a single service (start/stop/restart) optionally ensuring env is applied first.
+    """
+    if settings_value:
+      await self.apply_settings_env(settings_value, restart=False)
+    if action == "start":
+      return await start_service(service_key)
+    if action == "stop":
+      return await shutdown_service(service_key)
+    if action == "restart":
+      return await restart_service(service_key)
+    return {"success": False, "error": f"Unsupported action: {action}"}
 
 
 __all__ = ["BrainDriveRAGCommunityLifecycleManager"]
