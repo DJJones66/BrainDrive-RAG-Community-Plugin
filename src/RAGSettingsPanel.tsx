@@ -9,6 +9,14 @@ const PLUGIN_SLUG = "BrainDriveRAGCommunity";
 
 type ServiceKey = "document_chat" | "document_processing";
 
+type HealthBadgeStatus = "idle" | "checking" | "ok" | "bad";
+
+type HealthBadge = {
+  status: HealthBadgeStatus;
+  label: string;
+  details?: string;
+};
+
 type ApiService = {
   get?: (url: string, options?: unknown) => Promise<any>;
   post?: (url: string, body?: unknown, options?: unknown) => Promise<any>;
@@ -59,7 +67,7 @@ type State = {
   saving: boolean;
   error?: string;
   success?: string;
-  health: Record<ServiceKey, string>;
+  health: Record<ServiceKey, HealthBadge>;
   accordions: Record<string, boolean>;
   currentTheme: string;
   providerCatalogLoading: boolean;
@@ -340,8 +348,8 @@ class BrainDriveRAGSettings extends React.Component<PanelProps, State> {
       error: undefined,
       success: undefined,
       health: {
-        document_chat: "",
-        document_processing: ""
+        document_chat: { status: "idle", label: "" },
+        document_processing: { status: "idle", label: "" },
       },
       accordions: {
         connectivity_chat: false,
@@ -434,10 +442,10 @@ class BrainDriveRAGSettings extends React.Component<PanelProps, State> {
     }));
   };
 
-  setHealthMessage = (key: ServiceKey, message: string) => {
+  setHealthBadge = (key: ServiceKey, badge: HealthBadge) => {
     this.setState((prev) => ({
       ...prev,
-      health: { ...prev.health, [key]: message }
+      health: { ...prev.health, [key]: badge }
     }));
   };
 
@@ -705,17 +713,23 @@ class BrainDriveRAGSettings extends React.Component<PanelProps, State> {
   handleHealthCheck = async (serviceKey: ServiceKey) => {
     const settings = this.state.settings[serviceKey];
     const url = buildHealthUrl(settings);
-    this.setHealthMessage(serviceKey, "checking...");
+    this.setHealthBadge(serviceKey, { status: "checking", label: "Checking…" });
     try {
       const resp = await fetch(url, { method: "GET", credentials: "omit", mode: "cors" });
       if (!resp.ok) {
-        this.setHealthMessage(serviceKey, `Unhealthy (${resp.status})`);
+        const body = await resp.text().catch(() => "");
+        const details = body ? `HTTP ${resp.status}: ${body}` : `HTTP ${resp.status}`;
+        this.setHealthBadge(serviceKey, { status: "bad", label: "Not running", details });
         return;
       }
-      const text = await resp.text();
-      this.setHealthMessage(serviceKey, text || "Healthy");
+      const text = await resp.text().catch(() => "");
+      this.setHealthBadge(serviceKey, {
+        status: "ok",
+        label: "Running",
+        details: text ? text : `HTTP ${resp.status}`,
+      });
     } catch (err: any) {
-      this.setHealthMessage(serviceKey, `Check failed: ${err?.message || err}`);
+      this.setHealthBadge(serviceKey, { status: "bad", label: "Not running", details: err?.message || String(err) });
     }
   };
 
@@ -1227,7 +1241,15 @@ class BrainDriveRAGSettings extends React.Component<PanelProps, State> {
 
   renderServiceCard = (serviceKey: ServiceKey, title: string, description: string) => {
     const svc = this.state.settings[serviceKey];
-    const healthMessage = this.state.health[serviceKey];
+    const health = this.state.health[serviceKey];
+    const healthClass =
+      health.status === "ok"
+        ? "rag-health rag-health--ok"
+        : health.status === "bad"
+          ? "rag-health rag-health--bad"
+          : health.status === "checking"
+            ? "rag-health rag-health--checking"
+            : "rag-health";
     return (
       <div className="rag-card">
         <div className="rag-card-header">
@@ -1251,7 +1273,11 @@ class BrainDriveRAGSettings extends React.Component<PanelProps, State> {
           <button onClick={() => this.controlService("stop", serviceKey)} className="rag-button">Stop</button>
           <button onClick={() => this.controlService("restart", serviceKey)} className="rag-button">Restart</button>
           <button onClick={() => this.handleHealthCheck(serviceKey)} className="rag-button">Health</button>
-          <span className="rag-health">{healthMessage}</span>
+          {health.label && (
+            <span className={healthClass} title={health.details || ""} aria-live="polite">
+              {health.label}
+            </span>
+          )}
         </div>
 
         <div className="rag-section-stack">

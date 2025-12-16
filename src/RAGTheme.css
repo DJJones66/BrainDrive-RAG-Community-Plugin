@@ -116,7 +116,31 @@
 
 .rag-health {
   font-size: 12px;
+  line-height: 1;
+  padding: 4px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--rag-input-border);
+  background: var(--rag-input-bg);
   color: var(--rag-muted-color);
+  white-space: nowrap;
+}
+
+.rag-health--ok {
+  background: var(--rag-banner-ok-bg);
+  border-color: var(--rag-banner-ok-border);
+  color: var(--rag-banner-ok-text);
+}
+
+.rag-health--bad {
+  background: var(--rag-banner-err-bg);
+  border-color: var(--rag-banner-err-border);
+  color: var(--rag-banner-err-text);
+}
+
+.rag-health--checking {
+  background: rgba(59, 130, 246, 0.12);
+  border-color: var(--rag-button-fill-border);
+  color: var(--rag-button-fill-border);
 }
 
 .rag-button {
