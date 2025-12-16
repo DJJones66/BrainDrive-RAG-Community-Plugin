@@ -22,7 +22,7 @@
   --rag-banner-ok-border: #bbf7d0;
   --rag-banner-ok-text: #166534;
   --rag-input-bg: var(--rag-bg-color);
-  --rag-input-border: var(--rag-border-color);
+  --rag-input-border: var(--rag-button-outline);
 }
 
 .dark-theme {
@@ -48,7 +48,7 @@
   --rag-banner-ok-border: #22c55e;
   --rag-banner-ok-text: #c6f6d5;
   --rag-input-bg: var(--rag-bg-color);
-  --rag-input-border: var(--rag-border-color);
+  --rag-input-border: var(--rag-button-outline);
 }
 
 .rag-settings {
