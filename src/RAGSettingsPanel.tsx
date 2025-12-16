@@ -1,5 +1,8 @@
 import React from "react";
 import "./RAGTheme.css";
+import { fetchOllamaServers, fetchProviderCatalog, fetchProviderModels } from "./shared/provider-selection/api";
+import { filterModelsByPurpose } from "./shared/provider-selection/modelPurpose";
+import type { OllamaServer, ProviderCatalogEntry, ProviderModel, ModelPurpose } from "./shared/provider-selection/types";
 
 const SETTINGS_DEFINITION_ID = "braindrive_rag_service_settings";
 const PLUGIN_SLUG = "BrainDriveRAGCommunity";
@@ -48,6 +51,8 @@ type SettingsValue = {
   full_install?: boolean;
 };
 
+type ProviderSectionKey = "llm" | "embedding" | "contextual" | "evaluation";
+
 type State = {
   settings: SettingsValue;
   loading: boolean;
@@ -57,6 +62,14 @@ type State = {
   health: Record<ServiceKey, string>;
   accordions: Record<string, boolean>;
   currentTheme: string;
+  providerCatalogLoading: boolean;
+  providerCatalogError?: string;
+  providerCatalog: ProviderCatalogEntry[];
+  ollamaServers: OllamaServer[];
+  modelsBySection: Record<ProviderSectionKey, ProviderModel[]>;
+  modelLoadingBySection: Record<ProviderSectionKey, boolean>;
+  modelErrorBySection: Record<ProviderSectionKey, string | undefined>;
+  modelFilterBySection: Record<ProviderSectionKey, string>;
 };
 
 const defaultServiceSettings = (service: ServiceKey): ServiceSettings => {
@@ -74,11 +87,14 @@ const defaultServiceSettings = (service: ServiceKey): ServiceSettings => {
         DOCUMENT_PROCESSOR_API_URL: "http://localhost:18080/documents/",
         LLM_PROVIDER: "ollama",
         EMBEDDING_PROVIDER: "ollama",
+        OLLAMA_LLM_SERVER_ID: "",
         OLLAMA_LLM_BASE_URL: "",
         OLLAMA_LLM_MODEL: "",
+        OLLAMA_EMBEDDING_SERVER_ID: "",
         OLLAMA_EMBEDDING_BASE_URL: "",
         OLLAMA_EMBEDDING_MODEL: "",
         ENABLE_CONTEXTUAL_RETRIEVAL: "false",
+        OLLAMA_CONTEXTUAL_LLM_SERVER_ID: "",
         OLLAMA_CONTEXTUAL_LLM_BASE_URL: "",
         OLLAMA_CONTEXTUAL_LLM_MODEL: "",
         EVALUATION_PROVIDER: "openai",
@@ -139,6 +155,107 @@ function mergeSettings(loaded?: any): SettingsValue {
     document_processing: mergeServiceSettings(base.document_processing, incomingProc || {}),
     full_install: Boolean((loaded as any).full_install || false),
   };
+}
+
+const PROVIDER_SECTION_KEYS: ProviderSectionKey[] = ["llm", "embedding", "contextual", "evaluation"];
+
+type ProviderSectionConfig = {
+  purpose: ModelPurpose;
+  allowedProviders: string[];
+  providerEnvKey?: string;
+  serverIdEnvKey?: string;
+  baseUrlEnvKey?: string;
+  modelEnvKey: string;
+  supportsServers: (provider: string) => boolean;
+};
+
+const SECTION_CONFIG: Record<ProviderSectionKey, ProviderSectionConfig> = {
+  llm: {
+    purpose: "chat",
+    allowedProviders: ["ollama", "openai", "groq", "openrouter"],
+    providerEnvKey: "LLM_PROVIDER",
+    serverIdEnvKey: "OLLAMA_LLM_SERVER_ID",
+    baseUrlEnvKey: "OLLAMA_LLM_BASE_URL",
+    modelEnvKey: "OLLAMA_LLM_MODEL",
+    supportsServers: (provider) => provider === "ollama",
+  },
+  embedding: {
+    purpose: "embedding",
+    allowedProviders: ["ollama", "openai"],
+    providerEnvKey: "EMBEDDING_PROVIDER",
+    serverIdEnvKey: "OLLAMA_EMBEDDING_SERVER_ID",
+    baseUrlEnvKey: "OLLAMA_EMBEDDING_BASE_URL",
+    modelEnvKey: "OLLAMA_EMBEDDING_MODEL",
+    supportsServers: (provider) => provider === "ollama",
+  },
+  contextual: {
+    purpose: "chat",
+    allowedProviders: ["ollama"],
+    serverIdEnvKey: "OLLAMA_CONTEXTUAL_LLM_SERVER_ID",
+    baseUrlEnvKey: "OLLAMA_CONTEXTUAL_LLM_BASE_URL",
+    modelEnvKey: "OLLAMA_CONTEXTUAL_LLM_MODEL",
+    supportsServers: (provider) => provider === "ollama",
+  },
+  evaluation: {
+    purpose: "evaluation",
+    allowedProviders: ["openai", "ollama", "groq"],
+    providerEnvKey: "EVALUATION_PROVIDER",
+    modelEnvKey: "OPENAI_EVALUATION_MODEL",
+    supportsServers: () => false,
+  },
+};
+
+function resolveOllamaServerSelection(
+  servers: OllamaServer[],
+  storedServerId: string | undefined,
+  storedBaseUrl: string | undefined,
+): { serverId: string; baseUrl: string; isCustom: boolean } {
+  const baseUrl = storedBaseUrl || "";
+  if (!Array.isArray(servers) || servers.length === 0) {
+    return { serverId: "", baseUrl, isCustom: true };
+  }
+
+  const byId = storedServerId ? servers.find((s) => s.id === storedServerId) : undefined;
+  if (byId) {
+    return {
+      serverId: byId.id,
+      baseUrl: byId.serverAddress || baseUrl,
+      isCustom: false,
+    };
+  }
+
+  const byUrl = baseUrl ? servers.find((s) => s.serverAddress === baseUrl) : undefined;
+  if (byUrl) {
+    return { serverId: byUrl.id, baseUrl: byUrl.serverAddress, isCustom: false };
+  }
+
+  if (!baseUrl) {
+    const first = servers[0];
+    return { serverId: first.id, baseUrl: first.serverAddress || "", isCustom: false };
+  }
+
+  return { serverId: "", baseUrl, isCustom: true };
+}
+
+function applyOllamaDefaultsToSettings(settings: SettingsValue, servers: OllamaServer[]): SettingsValue {
+  const next = { ...settings };
+  const chat = next.document_chat;
+  const chatEnv = { ...chat.env };
+
+  const llmSel = resolveOllamaServerSelection(servers, chatEnv.OLLAMA_LLM_SERVER_ID, chatEnv.OLLAMA_LLM_BASE_URL);
+  chatEnv.OLLAMA_LLM_SERVER_ID = llmSel.serverId;
+  chatEnv.OLLAMA_LLM_BASE_URL = llmSel.baseUrl;
+
+  const embSel = resolveOllamaServerSelection(servers, chatEnv.OLLAMA_EMBEDDING_SERVER_ID, chatEnv.OLLAMA_EMBEDDING_BASE_URL);
+  chatEnv.OLLAMA_EMBEDDING_SERVER_ID = embSel.serverId;
+  chatEnv.OLLAMA_EMBEDDING_BASE_URL = embSel.baseUrl;
+
+  const ctxSel = resolveOllamaServerSelection(servers, chatEnv.OLLAMA_CONTEXTUAL_LLM_SERVER_ID, chatEnv.OLLAMA_CONTEXTUAL_LLM_BASE_URL);
+  chatEnv.OLLAMA_CONTEXTUAL_LLM_SERVER_ID = ctxSel.serverId;
+  chatEnv.OLLAMA_CONTEXTUAL_LLM_BASE_URL = ctxSel.baseUrl;
+
+  next.document_chat = { ...chat, env: chatEnv };
+  return next;
 }
 
 function buildEnvPayload(settings: SettingsValue): Record<string, Record<string, string>> {
@@ -235,13 +352,44 @@ class BrainDriveRAGSettings extends React.Component<PanelProps, State> {
         evaluation: false,
         processing_env: false,
       },
-  currentTheme: "light",
+      currentTheme: "light",
+      providerCatalogLoading: false,
+      providerCatalogError: undefined,
+      providerCatalog: [],
+      ollamaServers: [],
+      modelsBySection: {
+        llm: [],
+        embedding: [],
+        contextual: [],
+        evaluation: [],
+      },
+      modelLoadingBySection: {
+        llm: false,
+        embedding: false,
+        contextual: false,
+        evaluation: false,
+      },
+      modelErrorBySection: {
+        llm: undefined,
+        embedding: undefined,
+        contextual: undefined,
+        evaluation: undefined,
+      },
+      modelFilterBySection: {
+        llm: "",
+        embedding: "",
+        contextual: "",
+        evaluation: "",
+      },
     };
   }
 
   componentDidMount(): void {
     this.initializeThemeService();
-    void this.loadSettings();
+    void (async () => {
+      await this.loadSettings();
+      await this.loadProviderSelectionData();
+    })();
   }
 
   componentWillUnmount(): void {
@@ -315,6 +463,176 @@ class BrainDriveRAGSettings extends React.Component<PanelProps, State> {
       this.setState((prev) => ({ ...prev, settings: merged, loading: false }));
     } catch (err: any) {
       this.setState((prev) => ({ ...prev, loading: false, error: err?.message || "Failed to load settings" }));
+    }
+  };
+
+  updateEnvFields = (serviceKey: ServiceKey, updates: Record<string, string>, callback?: () => void) => {
+    this.setState((prev) => ({
+      ...prev,
+      settings: {
+        ...prev.settings,
+        [serviceKey]: {
+          ...prev.settings[serviceKey],
+          env: { ...prev.settings[serviceKey].env, ...updates }
+        }
+      }
+    }), callback);
+  };
+
+  setModelFilter = (section: ProviderSectionKey, value: string) => {
+    this.setState((prev) => ({
+      ...prev,
+      modelFilterBySection: { ...prev.modelFilterBySection, [section]: value }
+    }));
+  };
+
+  loadProviderSelectionData = async (): Promise<void> => {
+    const api = this.props.services?.api;
+    if (!api?.get) {
+      this.setState({
+        providerCatalogLoading: false,
+        providerCatalogError: "API service not available",
+        providerCatalog: [],
+        ollamaServers: [],
+      });
+      return;
+    }
+
+    this.setState({ providerCatalogLoading: true, providerCatalogError: undefined });
+    try {
+      const [catalog, servers] = await Promise.all([
+        fetchProviderCatalog(api, { userId: "current", includeUnconfigured: true }),
+        fetchOllamaServers(api, { userId: "current" }),
+      ]);
+
+      this.setState((prev) => ({
+        ...prev,
+        providerCatalogLoading: false,
+        providerCatalogError: undefined,
+        providerCatalog: catalog,
+        ollamaServers: servers,
+        settings: applyOllamaDefaultsToSettings(prev.settings, servers),
+      }), () => {
+        void this.refreshModelsForSection("llm");
+        void this.refreshModelsForSection("embedding");
+        const contextualEnabled = String(this.state.settings.document_chat.env.ENABLE_CONTEXTUAL_RETRIEVAL).toLowerCase() === "true";
+        if (contextualEnabled) void this.refreshModelsForSection("contextual");
+        void this.refreshModelsForSection("evaluation");
+      });
+    } catch (err: any) {
+      this.setState({
+        providerCatalogLoading: false,
+        providerCatalogError: err?.message || "Failed to load provider catalog",
+        providerCatalog: [],
+        ollamaServers: [],
+      });
+    }
+  };
+
+  private resolveProviderMeta(providerId: string): { settingsId: string | null; defaultServerId: string | null } {
+    const entry = this.state.providerCatalog.find((p) => p.id === providerId);
+    return {
+      settingsId: entry?.settingsId ?? null,
+      defaultServerId: entry?.defaultServerId ?? null,
+    };
+  }
+
+  refreshModelsForSection = async (section: ProviderSectionKey): Promise<void> => {
+    const api = this.props.services?.api;
+    if (!api?.get) return;
+
+    const cfg = SECTION_CONFIG[section];
+    const chatEnv = this.state.settings.document_chat.env;
+
+    const providerId = section === "contextual"
+      ? "ollama"
+      : (cfg.providerEnvKey ? (chatEnv[cfg.providerEnvKey] || "") : "");
+
+    if (section === "evaluation" && providerId && providerId !== "openai") {
+      this.setState((prev) => ({
+        ...prev,
+        modelsBySection: { ...prev.modelsBySection, [section]: [] },
+        modelErrorBySection: { ...prev.modelErrorBySection, [section]: undefined },
+      }));
+      return;
+    }
+
+    if (!providerId) {
+      this.setState((prev) => ({
+        ...prev,
+        modelsBySection: { ...prev.modelsBySection, [section]: [] },
+        modelErrorBySection: { ...prev.modelErrorBySection, [section]: "Select a provider first" },
+      }));
+      return;
+    }
+
+    this.setState((prev) => ({
+      ...prev,
+      modelLoadingBySection: { ...prev.modelLoadingBySection, [section]: true },
+      modelErrorBySection: { ...prev.modelErrorBySection, [section]: undefined },
+    }));
+
+    try {
+      let settingsId: string | null = null;
+      let serverId: string | null = null;
+
+      if (cfg.supportsServers(providerId)) {
+        const serverKey = cfg.serverIdEnvKey || "";
+        const baseUrlKey = cfg.baseUrlEnvKey || "";
+        const sel = resolveOllamaServerSelection(
+          this.state.ollamaServers,
+          chatEnv[serverKey],
+          chatEnv[baseUrlKey],
+        );
+        if (!sel.serverId) {
+          // Custom URL not backed by ollama_servers_settings -> no backend model list available
+          this.setState((prev) => ({
+            ...prev,
+            modelsBySection: { ...prev.modelsBySection, [section]: [] },
+            modelLoadingBySection: { ...prev.modelLoadingBySection, [section]: false },
+            modelErrorBySection: { ...prev.modelErrorBySection, [section]: "Custom server URL: model list unavailable" },
+          }));
+          return;
+        }
+        settingsId = "ollama_servers_settings";
+        serverId = sel.serverId;
+      } else {
+        const meta = this.resolveProviderMeta(providerId);
+        settingsId = meta.settingsId;
+        serverId = meta.defaultServerId;
+      }
+
+      if (!settingsId || !serverId) {
+        this.setState((prev) => ({
+          ...prev,
+          modelsBySection: { ...prev.modelsBySection, [section]: [] },
+          modelLoadingBySection: { ...prev.modelLoadingBySection, [section]: false },
+          modelErrorBySection: { ...prev.modelErrorBySection, [section]: "Provider metadata unavailable" },
+        }));
+        return;
+      }
+
+      const models = await fetchProviderModels(api, {
+        provider: providerId,
+        settingsId,
+        serverId,
+        userId: "current",
+      });
+
+      const filtered = filterModelsByPurpose(models, cfg.purpose);
+      this.setState((prev) => ({
+        ...prev,
+        modelsBySection: { ...prev.modelsBySection, [section]: filtered },
+        modelLoadingBySection: { ...prev.modelLoadingBySection, [section]: false },
+        modelErrorBySection: { ...prev.modelErrorBySection, [section]: undefined },
+      }));
+    } catch (err: any) {
+      this.setState((prev) => ({
+        ...prev,
+        modelsBySection: { ...prev.modelsBySection, [section]: [] },
+        modelLoadingBySection: { ...prev.modelLoadingBySection, [section]: false },
+        modelErrorBySection: { ...prev.modelErrorBySection, [section]: err?.message || "Failed to load models" },
+      }));
     }
   };
 
@@ -456,74 +774,428 @@ class BrainDriveRAGSettings extends React.Component<PanelProps, State> {
 
   renderRuntime = () => {
     const chat = this.state.settings.document_chat;
-    const contextualEnabled = String(chat.env.ENABLE_CONTEXTUAL_RETRIEVAL).toLowerCase() === "true";
+    const chatEnv = chat.env;
+    const contextualEnabled = String(chatEnv.ENABLE_CONTEXTUAL_RETRIEVAL).toLowerCase() === "true";
+    const catalog = this.state.providerCatalog;
+    const servers = this.state.ollamaServers;
+
+    const providerLabel = (id: string) => catalog.find((p) => p.id === id)?.label || id;
+
+    const buildProviderOptions = (section: ProviderSectionKey, selectedProvider: string) => {
+      const allowed = SECTION_CONFIG[section].allowedProviders;
+      const fromCatalog = catalog.filter((p) => allowed.includes(p.id));
+      const available = fromCatalog.filter((p) => p.configured && p.enabled);
+      const baseIds = available.length > 0 ? available.map((p) => p.id) : allowed;
+      const ids = baseIds.includes(selectedProvider) ? baseIds : [...baseIds, selectedProvider];
+      return ids.map((id) => ({ id, label: providerLabel(id) }));
+    };
+
+    const filterModels = (section: ProviderSectionKey) => {
+      const query = (this.state.modelFilterBySection[section] || "").trim().toLowerCase();
+      const models = this.state.modelsBySection[section] || [];
+      if (!query) return models;
+      return models.filter((m) => (m.name || "").toLowerCase().includes(query));
+    };
+
+    const llmProvider = chatEnv.LLM_PROVIDER || "ollama";
+    const embeddingProvider = chatEnv.EMBEDDING_PROVIDER || "ollama";
+    const evaluationProvider = chatEnv.EVALUATION_PROVIDER || "openai";
+
+    const llmServerSel = resolveOllamaServerSelection(servers, chatEnv.OLLAMA_LLM_SERVER_ID, chatEnv.OLLAMA_LLM_BASE_URL);
+    const embeddingServerSel = resolveOllamaServerSelection(servers, chatEnv.OLLAMA_EMBEDDING_SERVER_ID, chatEnv.OLLAMA_EMBEDDING_BASE_URL);
+    const contextualServerSel = resolveOllamaServerSelection(servers, chatEnv.OLLAMA_CONTEXTUAL_LLM_SERVER_ID, chatEnv.OLLAMA_CONTEXTUAL_LLM_BASE_URL);
+
     return (
       <>
         <Accordion title="LLM Provider" id="llm" open={this.state.accordions.llm} onToggle={this.setAccordion}>
+          {this.state.providerCatalogError && (
+            <div className="rag-banner rag-banner--error">
+              Provider catalog unavailable: {this.state.providerCatalogError}
+            </div>
+          )}
           <Field label="Provider">
-            <select className="rag-select" value={chat.env.LLM_PROVIDER} onChange={(e) => this.updateEnvField("document_chat", "LLM_PROVIDER", e.target.value)}>
-              <option value="ollama">ollama</option>
-              <option value="openai">openai</option>
-              <option value="groq">groq</option>
-              <option value="openrouter">openrouter</option>
+            <select
+              className="rag-select"
+              value={llmProvider}
+              onChange={(e) => {
+                const next = e.target.value;
+                this.updateEnvField("document_chat", "LLM_PROVIDER", next);
+                this.setState((prev) => ({
+                  ...prev,
+                  modelsBySection: { ...prev.modelsBySection, llm: [] },
+                  modelErrorBySection: { ...prev.modelErrorBySection, llm: undefined },
+                }), () => void this.refreshModelsForSection("llm"));
+              }}
+            >
+              {buildProviderOptions("llm", llmProvider).map((p) => (
+                <option key={p.id} value={p.id}>{p.label}</option>
+              ))}
             </select>
           </Field>
-          <div className="rag-grid rag-grid--wide">
-            <Field label="Base URL">
-              <input className="rag-input" value={chat.env.OLLAMA_LLM_BASE_URL} onChange={(e) => this.updateEnvField("document_chat", "OLLAMA_LLM_BASE_URL", e.target.value)} />
-            </Field>
+          <div className="rag-grid rag-grid--server-model">
+            {llmProvider === "ollama" ? (
+              <Field label="Server">
+                {servers.length > 0 ? (
+                  <>
+                    <select
+                      className="rag-select"
+                      value={llmServerSel.isCustom ? "__custom__" : llmServerSel.serverId}
+                      onChange={(e) => {
+                        const next = e.target.value;
+                        if (next === "__custom__") {
+                          this.updateEnvFields("document_chat", {
+                            OLLAMA_LLM_SERVER_ID: "",
+                          }, () => void this.refreshModelsForSection("llm"));
+                          return;
+                        }
+                        const server = servers.find((s) => s.id === next);
+                        this.updateEnvFields("document_chat", {
+                          OLLAMA_LLM_SERVER_ID: next,
+                          OLLAMA_LLM_BASE_URL: server?.serverAddress || chatEnv.OLLAMA_LLM_BASE_URL || "",
+                        }, () => void this.refreshModelsForSection("llm"));
+                      }}
+                    >
+                      {servers.map((s) => (
+                        <option key={s.id} value={s.id}>{s.serverName} ({s.serverAddress})</option>
+                      ))}
+                      <option value="__custom__">Custom URL…</option>
+                    </select>
+                    {llmServerSel.isCustom && (
+                      <input
+                        className="rag-input"
+                        value={chatEnv.OLLAMA_LLM_BASE_URL || ""}
+                        onChange={(e) => this.updateEnvField("document_chat", "OLLAMA_LLM_BASE_URL", e.target.value)}
+                        placeholder="http://localhost:11434"
+                      />
+                    )}
+                  </>
+                ) : (
+                  <input
+                    className="rag-input"
+                    value={chatEnv.OLLAMA_LLM_BASE_URL || ""}
+                    onChange={(e) => this.updateEnvField("document_chat", "OLLAMA_LLM_BASE_URL", e.target.value)}
+                    placeholder="http://localhost:11434"
+                  />
+                )}
+              </Field>
+            ) : (
+              <Field label="Server">
+                <input className="rag-input" value="(no server selection)" disabled />
+              </Field>
+            )}
+
+            <div className="rag-field rag-field--action">
+              <span aria-hidden="true">Action</span>
+              <button className="rag-button" type="button" onClick={() => void this.refreshModelsForSection("llm")} disabled={this.state.modelLoadingBySection.llm}>
+                {this.state.modelLoadingBySection.llm ? "Loading…" : "Refresh models"}
+              </button>
+            </div>
+
             <Field label="Model">
-              <input className="rag-input" value={chat.env.OLLAMA_LLM_MODEL} onChange={(e) => this.updateEnvField("document_chat", "OLLAMA_LLM_MODEL", e.target.value)} />
+              {this.state.modelsBySection.llm.length > 20 && (
+                <input
+                  className="rag-input"
+                  value={this.state.modelFilterBySection.llm}
+                  onChange={(e) => this.setModelFilter("llm", e.target.value)}
+                  placeholder="Filter models…"
+                />
+              )}
+              {this.state.modelsBySection.llm.length > 0 ? (
+                <select
+                  className="rag-select"
+                  value={chatEnv.OLLAMA_LLM_MODEL || ""}
+                  onChange={(e) => this.updateEnvField("document_chat", "OLLAMA_LLM_MODEL", e.target.value)}
+                >
+                  <option value="">Select model…</option>
+                  {filterModels("llm").map((m) => (
+                    <option key={m.name} value={m.name}>{m.name}</option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  className="rag-input"
+                  value={chatEnv.OLLAMA_LLM_MODEL || ""}
+                  onChange={(e) => this.updateEnvField("document_chat", "OLLAMA_LLM_MODEL", e.target.value)}
+                  placeholder="Model name…"
+                />
+              )}
+              {this.state.modelErrorBySection.llm && (
+                <div className="rag-help">{this.state.modelErrorBySection.llm}</div>
+              )}
             </Field>
           </div>
         </Accordion>
 
         <Accordion title="Embedding Provider" id="embedding" open={this.state.accordions.embedding} onToggle={this.setAccordion}>
           <Field label="Provider">
-            <select className="rag-select" value={chat.env.EMBEDDING_PROVIDER} onChange={(e) => this.updateEnvField("document_chat", "EMBEDDING_PROVIDER", e.target.value)}>
-              <option value="ollama">ollama</option>
-              <option value="openai">openai</option>
+            <select
+              className="rag-select"
+              value={embeddingProvider}
+              onChange={(e) => {
+                const next = e.target.value;
+                this.updateEnvField("document_chat", "EMBEDDING_PROVIDER", next);
+                this.setState((prev) => ({
+                  ...prev,
+                  modelsBySection: { ...prev.modelsBySection, embedding: [] },
+                  modelErrorBySection: { ...prev.modelErrorBySection, embedding: undefined },
+                }), () => void this.refreshModelsForSection("embedding"));
+              }}
+            >
+              {buildProviderOptions("embedding", embeddingProvider).map((p) => (
+                <option key={p.id} value={p.id}>{p.label}</option>
+              ))}
             </select>
           </Field>
-          <div className="rag-grid rag-grid--wide">
-            <Field label="Base URL">
-              <input className="rag-input" value={chat.env.OLLAMA_EMBEDDING_BASE_URL} onChange={(e) => this.updateEnvField("document_chat", "OLLAMA_EMBEDDING_BASE_URL", e.target.value)} />
-            </Field>
+          <div className="rag-grid rag-grid--server-model">
+            {embeddingProvider === "ollama" ? (
+              <Field label="Server">
+                {servers.length > 0 ? (
+                  <>
+                    <select
+                      className="rag-select"
+                      value={embeddingServerSel.isCustom ? "__custom__" : embeddingServerSel.serverId}
+                      onChange={(e) => {
+                        const next = e.target.value;
+                        if (next === "__custom__") {
+                          this.updateEnvFields("document_chat", {
+                            OLLAMA_EMBEDDING_SERVER_ID: "",
+                          }, () => void this.refreshModelsForSection("embedding"));
+                          return;
+                        }
+                        const server = servers.find((s) => s.id === next);
+                        this.updateEnvFields("document_chat", {
+                          OLLAMA_EMBEDDING_SERVER_ID: next,
+                          OLLAMA_EMBEDDING_BASE_URL: server?.serverAddress || chatEnv.OLLAMA_EMBEDDING_BASE_URL || "",
+                        }, () => void this.refreshModelsForSection("embedding"));
+                      }}
+                    >
+                      {servers.map((s) => (
+                        <option key={s.id} value={s.id}>{s.serverName} ({s.serverAddress})</option>
+                      ))}
+                      <option value="__custom__">Custom URL…</option>
+                    </select>
+                    {embeddingServerSel.isCustom && (
+                      <input
+                        className="rag-input"
+                        value={chatEnv.OLLAMA_EMBEDDING_BASE_URL || ""}
+                        onChange={(e) => this.updateEnvField("document_chat", "OLLAMA_EMBEDDING_BASE_URL", e.target.value)}
+                        placeholder="http://localhost:11434"
+                      />
+                    )}
+                  </>
+                ) : (
+                  <input
+                    className="rag-input"
+                    value={chatEnv.OLLAMA_EMBEDDING_BASE_URL || ""}
+                    onChange={(e) => this.updateEnvField("document_chat", "OLLAMA_EMBEDDING_BASE_URL", e.target.value)}
+                    placeholder="http://localhost:11434"
+                  />
+                )}
+              </Field>
+            ) : (
+              <Field label="Server">
+                <input className="rag-input" value="(no server selection)" disabled />
+              </Field>
+            )}
+
+            <div className="rag-field rag-field--action">
+              <span aria-hidden="true">Action</span>
+              <button className="rag-button" type="button" onClick={() => void this.refreshModelsForSection("embedding")} disabled={this.state.modelLoadingBySection.embedding}>
+                {this.state.modelLoadingBySection.embedding ? "Loading…" : "Refresh models"}
+              </button>
+            </div>
+
             <Field label="Model">
-              <input className="rag-input" value={chat.env.OLLAMA_EMBEDDING_MODEL} onChange={(e) => this.updateEnvField("document_chat", "OLLAMA_EMBEDDING_MODEL", e.target.value)} />
+              {this.state.modelsBySection.embedding.length > 20 && (
+                <input
+                  className="rag-input"
+                  value={this.state.modelFilterBySection.embedding}
+                  onChange={(e) => this.setModelFilter("embedding", e.target.value)}
+                  placeholder="Filter models…"
+                />
+              )}
+              {this.state.modelsBySection.embedding.length > 0 ? (
+                <select
+                  className="rag-select"
+                  value={chatEnv.OLLAMA_EMBEDDING_MODEL || ""}
+                  onChange={(e) => this.updateEnvField("document_chat", "OLLAMA_EMBEDDING_MODEL", e.target.value)}
+                >
+                  <option value="">Select model…</option>
+                  {filterModels("embedding").map((m) => (
+                    <option key={m.name} value={m.name}>{m.name}</option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  className="rag-input"
+                  value={chatEnv.OLLAMA_EMBEDDING_MODEL || ""}
+                  onChange={(e) => this.updateEnvField("document_chat", "OLLAMA_EMBEDDING_MODEL", e.target.value)}
+                  placeholder="Model name…"
+                />
+              )}
+              {this.state.modelErrorBySection.embedding && (
+                <div className="rag-help">{this.state.modelErrorBySection.embedding}</div>
+              )}
             </Field>
           </div>
         </Accordion>
 
         <Accordion title="Contextual Retrieval" id="contextual" open={this.state.accordions.contextual} onToggle={this.setAccordion}>
           <label className="rag-checkbox-row">
-            <input type="checkbox" checked={contextualEnabled} onChange={(e) => this.updateEnvField("document_chat", "ENABLE_CONTEXTUAL_RETRIEVAL", e.target.checked ? "true" : "false")} />
+            <input
+              type="checkbox"
+              checked={contextualEnabled}
+              onChange={(e) => {
+                const next = e.target.checked ? "true" : "false";
+                this.updateEnvField("document_chat", "ENABLE_CONTEXTUAL_RETRIEVAL", next);
+                if (e.target.checked) {
+                  this.setState((prev) => ({
+                    ...prev,
+                    modelsBySection: { ...prev.modelsBySection, contextual: [] },
+                    modelErrorBySection: { ...prev.modelErrorBySection, contextual: undefined },
+                  }), () => void this.refreshModelsForSection("contextual"));
+                }
+              }}
+            />
             Enable contextual retrieval
           </label>
-          <div className="rag-grid rag-grid--wide">
-            <Field label="Base URL">
-              <input className="rag-input" value={chat.env.OLLAMA_CONTEXTUAL_LLM_BASE_URL} onChange={(e) => this.updateEnvField("document_chat", "OLLAMA_CONTEXTUAL_LLM_BASE_URL", e.target.value)} />
-            </Field>
-            <Field label="Model">
-              <input className="rag-input" value={chat.env.OLLAMA_CONTEXTUAL_LLM_MODEL} onChange={(e) => this.updateEnvField("document_chat", "OLLAMA_CONTEXTUAL_LLM_MODEL", e.target.value)} />
-            </Field>
-          </div>
+          {contextualEnabled && (
+            <div className="rag-grid rag-grid--server-model">
+              <Field label="Server">
+                {servers.length > 0 ? (
+                  <>
+                    <select
+                      className="rag-select"
+                      value={contextualServerSel.isCustom ? "__custom__" : contextualServerSel.serverId}
+                      onChange={(e) => {
+                        const next = e.target.value;
+                        if (next === "__custom__") {
+                          this.updateEnvFields("document_chat", {
+                            OLLAMA_CONTEXTUAL_LLM_SERVER_ID: "",
+                          }, () => void this.refreshModelsForSection("contextual"));
+                          return;
+                        }
+                        const server = servers.find((s) => s.id === next);
+                        this.updateEnvFields("document_chat", {
+                          OLLAMA_CONTEXTUAL_LLM_SERVER_ID: next,
+                          OLLAMA_CONTEXTUAL_LLM_BASE_URL: server?.serverAddress || chatEnv.OLLAMA_CONTEXTUAL_LLM_BASE_URL || "",
+                        }, () => void this.refreshModelsForSection("contextual"));
+                      }}
+                    >
+                      {servers.map((s) => (
+                        <option key={s.id} value={s.id}>{s.serverName} ({s.serverAddress})</option>
+                      ))}
+                      <option value="__custom__">Custom URL…</option>
+                    </select>
+                    {contextualServerSel.isCustom && (
+                      <input
+                        className="rag-input"
+                        value={chatEnv.OLLAMA_CONTEXTUAL_LLM_BASE_URL || ""}
+                        onChange={(e) => this.updateEnvField("document_chat", "OLLAMA_CONTEXTUAL_LLM_BASE_URL", e.target.value)}
+                        placeholder="http://localhost:11434"
+                      />
+                    )}
+                  </>
+                ) : (
+                  <input
+                    className="rag-input"
+                    value={chatEnv.OLLAMA_CONTEXTUAL_LLM_BASE_URL || ""}
+                    onChange={(e) => this.updateEnvField("document_chat", "OLLAMA_CONTEXTUAL_LLM_BASE_URL", e.target.value)}
+                    placeholder="http://localhost:11434"
+                  />
+                )}
+              </Field>
+
+              <div className="rag-field rag-field--action">
+                <span aria-hidden="true">Action</span>
+                <button className="rag-button" type="button" onClick={() => void this.refreshModelsForSection("contextual")} disabled={this.state.modelLoadingBySection.contextual}>
+                  {this.state.modelLoadingBySection.contextual ? "Loading…" : "Refresh models"}
+                </button>
+              </div>
+
+              <Field label="Model">
+                {this.state.modelsBySection.contextual.length > 20 && (
+                  <input
+                    className="rag-input"
+                    value={this.state.modelFilterBySection.contextual}
+                    onChange={(e) => this.setModelFilter("contextual", e.target.value)}
+                    placeholder="Filter models…"
+                  />
+                )}
+                {this.state.modelsBySection.contextual.length > 0 ? (
+                  <select
+                    className="rag-select"
+                    value={chatEnv.OLLAMA_CONTEXTUAL_LLM_MODEL || ""}
+                    onChange={(e) => this.updateEnvField("document_chat", "OLLAMA_CONTEXTUAL_LLM_MODEL", e.target.value)}
+                  >
+                    <option value="">Select model…</option>
+                    {filterModels("contextual").map((m) => (
+                      <option key={m.name} value={m.name}>{m.name}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    className="rag-input"
+                    value={chatEnv.OLLAMA_CONTEXTUAL_LLM_MODEL || ""}
+                    onChange={(e) => this.updateEnvField("document_chat", "OLLAMA_CONTEXTUAL_LLM_MODEL", e.target.value)}
+                    placeholder="Model name…"
+                  />
+                )}
+                {this.state.modelErrorBySection.contextual && (
+                  <div className="rag-help">{this.state.modelErrorBySection.contextual}</div>
+                )}
+              </Field>
+            </div>
+          )}
         </Accordion>
 
         <Accordion title="Evaluation Settings" id="evaluation" open={this.state.accordions.evaluation} onToggle={this.setAccordion}>
           <Field label="Provider">
-            <select className="rag-select" value={chat.env.EVALUATION_PROVIDER} onChange={(e) => this.updateEnvField("document_chat", "EVALUATION_PROVIDER", e.target.value)}>
-              <option value="openai">openai</option>
-              <option value="ollama">ollama</option>
-              <option value="groq">groq</option>
+            <select
+              className="rag-select"
+              value={evaluationProvider}
+              onChange={(e) => {
+                const next = e.target.value;
+                this.updateEnvField("document_chat", "EVALUATION_PROVIDER", next);
+                this.setState((prev) => ({
+                  ...prev,
+                  modelsBySection: { ...prev.modelsBySection, evaluation: [] },
+                  modelErrorBySection: { ...prev.modelErrorBySection, evaluation: undefined },
+                }), () => void this.refreshModelsForSection("evaluation"));
+              }}
+            >
+              {buildProviderOptions("evaluation", evaluationProvider).map((p) => (
+                <option key={p.id} value={p.id}>{p.label}</option>
+              ))}
             </select>
           </Field>
           <div className="rag-grid rag-grid--wide">
             <Field label="API Key">
-              <input className="rag-input" type="password" value={chat.env.OPENAI_EVALUATION_API_KEY} onChange={(e) => this.updateEnvField("document_chat", "OPENAI_EVALUATION_API_KEY", e.target.value)} />
+              <input className="rag-input" type="password" value={chatEnv.OPENAI_EVALUATION_API_KEY} onChange={(e) => this.updateEnvField("document_chat", "OPENAI_EVALUATION_API_KEY", e.target.value)} />
             </Field>
             <Field label="Model">
-              <input className="rag-input" value={chat.env.OPENAI_EVALUATION_MODEL} onChange={(e) => this.updateEnvField("document_chat", "OPENAI_EVALUATION_MODEL", e.target.value)} />
+              {evaluationProvider === "openai" && this.state.modelsBySection.evaluation.length > 0 ? (
+                <select
+                  className="rag-select"
+                  value={chatEnv.OPENAI_EVALUATION_MODEL || ""}
+                  onChange={(e) => this.updateEnvField("document_chat", "OPENAI_EVALUATION_MODEL", e.target.value)}
+                >
+                  <option value="">Select model…</option>
+                  {filterModels("evaluation").map((m) => (
+                    <option key={m.name} value={m.name}>{m.name}</option>
+                  ))}
+                </select>
+              ) : (
+                <input className="rag-input" value={chatEnv.OPENAI_EVALUATION_MODEL} onChange={(e) => this.updateEnvField("document_chat", "OPENAI_EVALUATION_MODEL", e.target.value)} />
+              )}
+              <div className="rag-actions">
+                <button className="rag-button" type="button" onClick={() => void this.refreshModelsForSection("evaluation")} disabled={this.state.modelLoadingBySection.evaluation}>
+                  {this.state.modelLoadingBySection.evaluation ? "Loading…" : "Refresh models"}
+                </button>
+              </div>
+              {this.state.modelErrorBySection.evaluation && (
+                <div className="rag-help">{this.state.modelErrorBySection.evaluation}</div>
+              )}
             </Field>
           </div>
         </Accordion>

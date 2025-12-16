@@ -179,6 +179,17 @@
   grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
 }
 
+.rag-grid--server-model {
+  grid-template-columns: minmax(200px, 1fr) max-content minmax(200px, 1fr);
+  align-items: start;
+}
+
+@media (max-width: 720px) {
+  .rag-grid--server-model {
+    grid-template-columns: 1fr;
+  }
+}
+
 .rag-section-stack {
   display: grid;
   gap: 12px;
@@ -190,6 +201,14 @@
   gap: 4px;
   font-size: 13px;
   color: var(--rag-text-color);
+}
+
+.rag-field--action span {
+  visibility: hidden;
+}
+
+.rag-field--action .rag-button {
+  white-space: nowrap;
 }
 
 .rag-field span {
