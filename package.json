@@ -4,9 +4,10 @@
   "description": "BrainDrive RAG community plugin with service controls for Document Chat and Document Processing.",
   "main": "dist/remoteEntry.js",
   "scripts": {
-    "build": "webpack --mode production",
-    "dev": "webpack --mode development --watch",
-    "start": "webpack serve --mode development",
+    "build": "webpack --env release=true",
+    "build:local": "webpack --env release=false",
+    "build:release": "webpack --env release=true",
+    "dev": "webpack serve --mode development",
     "clean": "rm -rf dist"
   },
   "keywords": [

@@ -394,12 +394,35 @@ def _ensure_env_file(service: ServiceConfig) -> None:
     env_path.write_text("\n".join(lines))
 
 
+def _treat_empty_as_unset(key: str) -> bool:
+  """
+  Certain env vars should never be written as empty strings because that can
+  override useful template defaults and break service startup.
+  """
+  return key.endswith("_MODEL") or key in {"JWT_EXPIRE_MINUTES", "JWT_SECRET", "AUTH_API_KEY"}
+
+
 def _render_env_file(existing_text: str, updates: Dict[str, str], allowed_keys: List[str], defaults: Dict[str, str]) -> str:
   """
   Render env content, updating only allowed_keys while preserving other lines/comments.
   """
   existing_values = _parse_env_lines(existing_text)
   seen: set[str] = set()
+
+  def resolve_value(key: str) -> str:
+    if key in updates:
+      candidate = str(updates.get(key, ""))
+      if not (_treat_empty_as_unset(key) and candidate.strip() == ""):
+        return candidate
+
+    existing = existing_values.get(key)
+    if existing is not None:
+      existing_str = str(existing)
+      if not (_treat_empty_as_unset(key) and existing_str.strip() == ""):
+        return existing_str
+
+    return str(defaults.get(key, ""))
+
   new_lines: List[str] = []
   for raw_line in existing_text.splitlines():
     line = raw_line.rstrip("\n")
@@ -409,7 +432,7 @@ def _render_env_file(existing_text: str, updates: Dict[str, str], allowed_keys: 
       continue
     key = stripped.split("=", 1)[0].strip()
     if key in allowed_keys:
-      value = updates.get(key, existing_values.get(key, defaults.get(key, "")))
+      value = resolve_value(key)
       new_lines.append(f"{key}={value}")
       seen.add(key)
     else:
@@ -418,7 +441,7 @@ def _render_env_file(existing_text: str, updates: Dict[str, str], allowed_keys: 
   for key in allowed_keys:
     if key in seen:
       continue
-    value = updates.get(key, existing_values.get(key, defaults.get(key, "")))
+    value = resolve_value(key)
     new_lines.append(f"{key}={value}")
   return "\n".join(new_lines).rstrip() + "\n"
 
@@ -444,6 +467,15 @@ def materialize_env_file(
   for candidate in _template_candidates(service):
     _, parsed_defaults = _parse_env_template(candidate)
     defaults.update(parsed_defaults)
+  fallback_defaults: Dict[str, Dict[str, str]] = {
+    "document_processing": {
+      "JWT_EXPIRE_MINUTES": "60",
+      "JWT_ALGORITHM": "HS256",
+      "AUTH_METHOD": "api_key",
+    }
+  }
+  for k, v in fallback_defaults.get(service_key, {}).items():
+    defaults.setdefault(k, v)
 
   existing_text = env_path.read_text() if env_path.exists() else ""
   rendered = _render_env_file(existing_text, values, allowed, defaults)
