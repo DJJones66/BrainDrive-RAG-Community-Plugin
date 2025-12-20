@@ -1,7 +1,8 @@
 const path = require("path");
 const HtmlWebpackPlugin = require("html-webpack-plugin");
 const { ModuleFederationPlugin } = require("webpack").container;
-const deps = require("./package.json").dependencies;
+const packageJson = require("./package.json");
+const deps = packageJson.dependencies;
 
 // BrainDrive RAG plugin federation settings
 const PLUGIN_SCOPE = "BrainDriveRAGCommunity";
@@ -16,7 +17,7 @@ const DEV_PORT = 3015;
 
 // Output paths
 const RELEASE_PATH = "dist"; // packaged plugin
-const LOCAL_PATH = "../../backend/plugins/shared/BrainDriveRAGCommunity/v1.0.0/dist";
+const LOCAL_PATH = `../../backend/plugins/shared/BrainDriveRAGCommunity/v1.0.0/dist`;
 
 module.exports = (env = {}, argv) => {
   const isRelease = env.release === true || env.release === "true";

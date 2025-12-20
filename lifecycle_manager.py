@@ -274,20 +274,28 @@ class BrainDriveRAGCommunityLifecycleManager(CommunityPluginLifecycleBase):
         "name": "document_chat",
         "source_url": "https://github.com/DJJones66/Document-Chat-Service",
         "type": "venv_process",
-        "install_command": "python3.11 service_scripts/install_with_venv.py --full",
-        "start_command": "python3.11 service_scripts/start_with_venv.py",
+        "install_command": "python service_scripts/install_with_venv.py --full",
+        "start_command": "python service_scripts/start_with_venv.py",
+        "stop_command": "python service_scripts/shutdown_with_venv.py",
+        "restart_command": "python service_scripts/restart_with_venv.py",
         "healthcheck_url": chat_defaults.get("health_url", "http://localhost:18000/health"),
         "definition_id": SETTINGS_DEFINITION_ID,
+        "runtime_dir_key": "Document-Chat-Service",
+        "env_inherit": "minimal",
         "required_env_vars": []
       },
       {
         "name": "document_processing",
         "source_url": "https://github.com/DJJones66/Document-Processing-Service",
         "type": "venv_process",
-        "install_command": "python3.11 service_scripts/install_with_venv.py --full",
-        "start_command": "python3.11 service_scripts/start_with_venv.py",
+        "install_command": "python service_scripts/install_with_venv.py --full",
+        "start_command": "python service_scripts/start_with_venv.py",
+        "stop_command": "python service_scripts/shutdown_with_venv.py",
+        "restart_command": "python service_scripts/restart_with_venv.py",
         "healthcheck_url": proc_defaults.get("health_url", "http://localhost:18080/health"),
         "definition_id": SETTINGS_DEFINITION_ID,
+        "runtime_dir_key": "Document-Processing-Service",
+        "env_inherit": "minimal",
         "required_env_vars": []
       }
     ]
@@ -525,9 +533,11 @@ class BrainDriveRAGCommunityLifecycleManager(CommunityPluginLifecycleBase):
         service_stmt = text("""
           INSERT INTO plugin_service_runtime
           (id, plugin_id, plugin_slug, name, source_url, type, install_command, start_command,
+          stop_command, restart_command, runtime_dir_key, env_inherit, env_overrides,
           healthcheck_url, definition_id, required_env_vars, status, created_at, updated_at, user_id)
           VALUES
           (:id, :plugin_id, :plugin_slug, :name, :source_url, :type, :install_command, :start_command,
+          :stop_command, :restart_command, :runtime_dir_key, :env_inherit, :env_overrides,
           :healthcheck_url, :definition_id, :required_env_vars, :status, :created_at, :updated_at, :user_id)
         """)
         await db.execute(service_stmt, {
@@ -539,6 +549,11 @@ class BrainDriveRAGCommunityLifecycleManager(CommunityPluginLifecycleBase):
           "type": service_data.get("type"),
           "install_command": service_data.get("install_command"),
           "start_command": service_data.get("start_command"),
+          "stop_command": service_data.get("stop_command"),
+          "restart_command": service_data.get("restart_command"),
+          "runtime_dir_key": service_data.get("runtime_dir_key"),
+          "env_inherit": service_data.get("env_inherit"),
+          "env_overrides": json.dumps(service_data.get("env_overrides")) if service_data.get("env_overrides") is not None else None,
           "healthcheck_url": service_data.get("healthcheck_url"),
           "definition_id": service_data.get("definition_id"),
           "required_env_vars": json.dumps(service_data.get("required_env_vars", [])),

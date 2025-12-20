@@ -339,6 +339,8 @@ function Field({
 }
 
 class BrainDriveRAGSettings extends React.Component<PanelProps, State> {
+  private healthClearTimers: Partial<Record<ServiceKey, number>> = {};
+
   constructor(props: PanelProps) {
     super(props);
     this.state = {
@@ -405,6 +407,8 @@ class BrainDriveRAGSettings extends React.Component<PanelProps, State> {
     if (themeSvc?.removeThemeChangeListener) {
       themeSvc.removeThemeChangeListener(this.handleThemeChange);
     }
+    Object.values(this.healthClearTimers).forEach((timerId) => window.clearTimeout(timerId));
+    this.healthClearTimers = {};
   }
 
   initializeThemeService() {
@@ -447,6 +451,22 @@ class BrainDriveRAGSettings extends React.Component<PanelProps, State> {
       ...prev,
       health: { ...prev.health, [key]: badge }
     }));
+  };
+
+  clearHealthTimer = (key: ServiceKey) => {
+    const timerId = this.healthClearTimers[key];
+    if (timerId) {
+      window.clearTimeout(timerId);
+      delete this.healthClearTimers[key];
+    }
+  };
+
+  scheduleHealthClear = (key: ServiceKey, delayMs: number = 5000) => {
+    this.clearHealthTimer(key);
+    this.healthClearTimers[key] = window.setTimeout(() => {
+      this.setHealthBadge(key, { status: "idle", label: "" });
+      delete this.healthClearTimers[key];
+    }, delayMs);
   };
 
   loadSettings = async () => {
@@ -537,11 +557,12 @@ class BrainDriveRAGSettings extends React.Component<PanelProps, State> {
     }
   };
 
-  private resolveProviderMeta(providerId: string): { settingsId: string | null; defaultServerId: string | null } {
+  private resolveProviderMeta(providerId: string): { settingsId: string | null; defaultServerId: string | null; configured: boolean } {
     const entry = this.state.providerCatalog.find((p) => p.id === providerId);
     return {
       settingsId: entry?.settingsId ?? null,
       defaultServerId: entry?.defaultServerId ?? null,
+      configured: Boolean(entry?.configured),
     };
   }
 
@@ -606,6 +627,15 @@ class BrainDriveRAGSettings extends React.Component<PanelProps, State> {
         serverId = sel.serverId;
       } else {
         const meta = this.resolveProviderMeta(providerId);
+        if (!meta.configured) {
+          this.setState((prev) => ({
+            ...prev,
+            modelsBySection: { ...prev.modelsBySection, [section]: [] },
+            modelLoadingBySection: { ...prev.modelLoadingBySection, [section]: false },
+            modelErrorBySection: { ...prev.modelErrorBySection, [section]: "Provider not configured" },
+          }));
+          return;
+        }
         settingsId = meta.settingsId;
         serverId = meta.defaultServerId;
       }
@@ -713,6 +743,7 @@ class BrainDriveRAGSettings extends React.Component<PanelProps, State> {
   handleHealthCheck = async (serviceKey: ServiceKey) => {
     const settings = this.state.settings[serviceKey];
     const url = buildHealthUrl(settings);
+    this.clearHealthTimer(serviceKey);
     this.setHealthBadge(serviceKey, { status: "checking", label: "Checking…" });
     try {
       const resp = await fetch(url, { method: "GET", credentials: "omit", mode: "cors" });
@@ -720,6 +751,7 @@ class BrainDriveRAGSettings extends React.Component<PanelProps, State> {
         const body = await resp.text().catch(() => "");
         const details = body ? `HTTP ${resp.status}: ${body}` : `HTTP ${resp.status}`;
         this.setHealthBadge(serviceKey, { status: "bad", label: "Not running", details });
+        this.scheduleHealthClear(serviceKey);
         return;
       }
       const text = await resp.text().catch(() => "");
@@ -728,8 +760,10 @@ class BrainDriveRAGSettings extends React.Component<PanelProps, State> {
         label: "Running",
         details: text ? text : `HTTP ${resp.status}`,
       });
+      this.scheduleHealthClear(serviceKey);
     } catch (err: any) {
       this.setHealthBadge(serviceKey, { status: "bad", label: "Not running", details: err?.message || String(err) });
+      this.scheduleHealthClear(serviceKey);
     }
   };
 

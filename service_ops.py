@@ -1,15 +1,75 @@
 import asyncio
 import os
 import subprocess
+import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 from urllib import error, request
 
 DEFAULT_PYTHON_BIN = os.environ.get("RAG_PYTHON_BIN", "python3.11")
-BASE_RUNTIME_DIR = Path("/home/hacker/hank/BrainDrive-Core/backend/services_runtime")
-BASE_RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+SERVICES_RUNTIME_ENV_VAR = "BRAINDRIVE_SERVICES_RUNTIME_DIR"
+
+
+def resolve_services_runtime_dir(
+  env: Optional[Mapping[str, str]] = None,
+  current_file: Optional[Path] = None,
+) -> Path:
+  """
+  Resolve the BrainDrive services runtime directory in a portable way.
+
+  Priority:
+  1) BRAINDRIVE_SERVICES_RUNTIME_DIR env override (path to backend/services_runtime)
+  2) If running from backend/plugins/... find backend ancestor and use backend/services_runtime
+  3) If running from source tree, find a parent containing backend/ and use backend/services_runtime
+  4) Fallback to <cwd>/backend/services_runtime if it already exists
+  """
+  env_map = env or os.environ
+  override = str(env_map.get(SERVICES_RUNTIME_ENV_VAR, "")).strip()
+  if override:
+    return Path(override).expanduser().resolve()
+
+  current_file = current_file or Path(__file__).resolve()
+
+  # Installed/shared mode: .../backend/plugins/.../service_ops.py
+  for parent in [current_file.parent, *current_file.parents]:
+    if parent.name == "backend":
+      return (parent / "services_runtime").resolve()
+
+  # Dev/source mode: <repo_root>/PluginBuild/.../service_ops.py
+  for parent in [current_file.parent, *current_file.parents]:
+    backend_dir = parent / "backend"
+    if backend_dir.is_dir():
+      return (backend_dir / "services_runtime").resolve()
+
+  # Running inside BrainDrive (common during plugin validation): use CWD or its parents.
+  cwd = Path.cwd().resolve()
+  for parent in [cwd, *cwd.parents]:
+    if parent.name == "backend":
+      return (parent / "services_runtime").resolve()
+    backend_dir = parent / "backend"
+    if backend_dir.is_dir():
+      return (backend_dir / "services_runtime").resolve()
+
+  # Additional fallback: resolve via sys.path entries (covers cases where CWD is not near the repo).
+  for entry in sys.path:
+    if not entry:
+      continue
+    candidate = Path(entry).expanduser()
+    if candidate.name == "backend":
+      return (candidate / "services_runtime").resolve()
+    backend_dir = candidate / "backend"
+    if backend_dir.is_dir():
+      return (backend_dir / "services_runtime").resolve()
+
+  raise RuntimeError(
+    "Unable to resolve BrainDrive services_runtime directory. "
+    f"Set {SERVICES_RUNTIME_ENV_VAR} to <BrainDriveRoot>/backend/services_runtime."
+  )
+
+
+BASE_RUNTIME_DIR = resolve_services_runtime_dir()
 
 # Fallback env lists ensure backward compatibility with the legacy Chat-With-Docs plugin.
 DOC_PROCESSING_FALLBACK_ENV_VARS: List[str] = [
@@ -232,29 +292,43 @@ async def _start_background(script: Path, env: Optional[Dict[str, str]] = None, 
   env = {**os.environ, **(env or {})}
   workdir = cwd or script.parent
   log_file = workdir / "service_runtime.log"
-  log_fh = log_file.open("a", encoding="utf-8")
+  log_file.parent.mkdir(parents=True, exist_ok=True)
+
+  popen_kwargs: Dict[str, Any] = {}
+  if os.name != "nt":
+    popen_kwargs["start_new_session"] = True
+  elif hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"):  # pragma: no cover
+    popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
+
+  log_handle = log_file.open("ab")
   try:
-    proc = await asyncio.create_subprocess_exec(
-      *cmd,
+    proc = subprocess.Popen(
+      cmd,
       cwd=str(workdir),
       env=env,
-      stdout=log_fh,
-      stderr=log_fh,
+      stdin=subprocess.DEVNULL,
+      stdout=log_handle,
+      stderr=log_handle,
+      **popen_kwargs,
     )
-    # Give the process a moment to fail fast if it's going to
-    await asyncio.sleep(1)
-    rc = proc.returncode
-    return {
-      "success": rc is None or rc == 0,
-      "code": rc if rc is not None else 0,
-      "pid": proc.pid,
-      "cmd": " ".join(cmd),
-    }
+  except Exception as exc:
+    log_handle.close()
+    return {"success": False, "error": str(exc), "cmd": " ".join(cmd), "log_file": str(log_file)}
   finally:
     try:
-      log_fh.close()
+      log_handle.close()
     except Exception:
       pass
+
+  await asyncio.sleep(1)
+  rc = proc.poll()
+  return {
+    "success": rc is None or rc == 0,
+    "code": rc if rc is not None else 0,
+    "pid": proc.pid,
+    "cmd": " ".join(cmd),
+    "log_file": str(log_file),
+  }
 
 
 async def ensure_venv(service_key: str, force_recreate: bool = False) -> Dict[str, Any]:
@@ -292,9 +366,32 @@ async def restart_service(service_key: str) -> Dict[str, Any]:
 
 async def start_service(service_key: str) -> Dict[str, Any]:
   service = SERVICE_CONFIG[service_key]
+  # Avoid port conflicts: if it's already healthy, treat as started.
+  try:
+    healthy = await health_check(service_key, timeout=2)
+    if healthy.get("success"):
+      return {"success": True, "skipped": True, "reason": "already healthy", "health": healthy}
+  except Exception:
+    pass
+
   await _ensure_repo(service)
+  # If venv is missing, create it (install step is still separate).
+  if not service.venv_path.exists():
+    venv_result = await ensure_venv(service_key, force_recreate=False)
+    if not venv_result.get("success"):
+      return {"success": False, "step": "create_venv", **venv_result}
   script = service.scripts_dir / "start_with_venv.py"
-  return await _start_background(script, env=_service_env(service), cwd=service.repo_path)
+  start_result = await _start_background(script, env=_service_env(service), cwd=service.repo_path)
+  pid = start_result.get("pid")
+  if pid:
+    pidfile = service.repo_path / "data" / "service.pid"
+    try:
+      pidfile.parent.mkdir(parents=True, exist_ok=True)
+      pidfile.write_text(str(pid))
+      start_result["pidfile"] = str(pidfile)
+    except Exception:
+      pass
+  return start_result
 
 
 async def shutdown_service(service_key: str) -> Dict[str, Any]:
