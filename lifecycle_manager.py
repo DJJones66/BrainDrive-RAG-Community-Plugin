@@ -42,7 +42,9 @@ service_ops_spec.loader.exec_module(service_ops_module)
 prepare_service = service_ops_module.prepare_service
 shutdown_service = service_ops_module.shutdown_service
 restart_service = service_ops_module.restart_service
+
 start_service = service_ops_module.start_service
+
 health_check = service_ops_module.health_check
 get_service_metadata = service_ops_module.get_service_metadata
 get_required_env_vars_map = service_ops_module.get_required_env_vars_map
