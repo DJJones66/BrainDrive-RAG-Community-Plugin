@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 from urllib import error, request
+from urllib.parse import urlparse
 
 def _is_windows_store_stub(path: str) -> bool:
   if os.name != "nt":
@@ -274,6 +275,18 @@ def update_health_urls(overrides: Dict[str, str]) -> None:
       service.health_url = url
 
 
+def _port_from_url(url: str) -> Optional[str]:
+  if not url:
+    return None
+  try:
+    parsed = urlparse(url)
+  except Exception:
+    return None
+  if parsed.port is None:
+    return None
+  return str(parsed.port)
+
+
 def _resolve_log_file(cwd: Optional[Path], script: Optional[Path]) -> Path:
   if cwd and cwd.exists():
     return cwd / "service_runtime.log"
@@ -406,6 +419,9 @@ def _service_env(service: ServiceConfig) -> Dict[str, str]:
     "DATABASE_URL": "sqlite+aiosqlite:///./data/app.db",
     "PYTHON_BIN": DEFAULT_PYTHON_BIN,
   }
+  port = _port_from_url(service.health_url)
+  if port:
+    env["PROCESS_PORT"] = port
   max_file_size = _sanitize_int_env(os.environ.get("MAX_FILE_SIZE"))
   if max_file_size:
     env["MAX_FILE_SIZE"] = max_file_size

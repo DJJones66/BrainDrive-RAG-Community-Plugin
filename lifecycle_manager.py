@@ -14,8 +14,10 @@ import os
 import uuid
 from copy import deepcopy
 from pathlib import Path
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Set, Tuple
+from urllib.parse import unquote
 
+import httpx
 import structlog
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -26,6 +28,21 @@ try:
 except Exception:  # pragma: no cover - fallback for remote install
   encryption_service = None
   get_job_manager = None
+
+try:
+  from app.utils.ollama import normalize_server_base, make_dedupe_key  # type: ignore
+except Exception:  # pragma: no cover - fallback for remote install
+  def normalize_server_base(url: str) -> str:
+    url = unquote(url or "").strip()
+    url = url.rstrip("/")
+    if url.endswith("/api/pull"):
+      url = url[: -len("/api/pull")]
+    if url.endswith("/api"):
+      url = url[: -len("/api")]
+    return url
+
+  def make_dedupe_key(server_base: str, name: str) -> str:
+    return f"{server_base}|{name}"
 
 CURRENT_DIR = Path(__file__).resolve().parent
 
@@ -85,6 +102,13 @@ DOC_PROCESSING_ENV_KEYS: List[str] = [
   "JWT_SECRET",
 ]
 
+DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
+HARD_CODED_OLLAMA_MODELS: Tuple[Tuple[str, str, str], ...] = (
+  ("llama3.1:8b", DEFAULT_OLLAMA_BASE_URL, "OLLAMA_LLM_MODEL"),
+  ("nomic-embed-text:latest", DEFAULT_OLLAMA_BASE_URL, "OLLAMA_EMBEDDING_MODEL"),
+  ("llama3.2:3b", DEFAULT_OLLAMA_BASE_URL, "OLLAMA_CONTEXTUAL_LLM_MODEL"),
+)
+
 
 def _coerce_int(value: Any, default: int) -> int:
   try:
@@ -123,6 +147,43 @@ def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any
     else:
       result[key] = value
   return result
+
+
+def _expand_model_tokens(model: Dict[str, Any]) -> Set[str]:
+  tokens: Set[str] = set()
+  for key in ("name", "model", "digest"):
+    value = model.get(key)
+    if value:
+      tokens.add(str(value))
+  aliases = model.get("aliases") or []
+  if isinstance(aliases, list):
+    for alias in aliases:
+      if isinstance(alias, str):
+        tokens.add(alias)
+      elif isinstance(alias, dict):
+        for value in alias.values():
+          if value:
+            tokens.add(str(value))
+  expanded: Set[str] = set()
+  for token in tokens:
+    cleaned = str(token).strip().lower()
+    if not cleaned:
+      continue
+    expanded.add(cleaned)
+    if ":" in cleaned:
+      expanded.add(cleaned.split(":", 1)[0])
+  return expanded
+
+
+def _build_model_token_index(payload: Dict[str, Any]) -> Set[str]:
+  tokens: Set[str] = set()
+  models = payload.get("models") or []
+  if not isinstance(models, list):
+    return tokens
+  for model in models:
+    if isinstance(model, dict):
+      tokens.update(_expand_model_tokens(model))
+  return tokens
 
 
 def _build_service_defaults(service_key: str) -> Dict[str, Any]:
@@ -285,6 +346,7 @@ class BrainDriveRAGCommunityLifecycleManager(CommunityPluginLifecycleBase):
         "definition_id": SETTINGS_DEFINITION_ID,
         "runtime_dir_key": "Document-Chat-Service",
         "env_inherit": "minimal",
+        "env_overrides": {"PROCESS_PORT": str(chat_defaults.get("port", 18000))},
         "required_env_vars": []
       },
       {
@@ -299,6 +361,7 @@ class BrainDriveRAGCommunityLifecycleManager(CommunityPluginLifecycleBase):
         "definition_id": SETTINGS_DEFINITION_ID,
         "runtime_dir_key": "Document-Processing-Service",
         "env_inherit": "minimal",
+        "env_overrides": {"PROCESS_PORT": str(proc_defaults.get("port", 18080))},
         "required_env_vars": []
       }
     ]
@@ -343,6 +406,7 @@ class BrainDriveRAGCommunityLifecycleManager(CommunityPluginLifecycleBase):
           svc_settings.get("port", 0) or (18000 if name == "document_chat" else 18080)
         )
         service["healthcheck_url"] = normalized.get("health_url", service.get("healthcheck_url"))
+        service["env_overrides"] = {"PROCESS_PORT": str(normalized.get("port", 0) or (18000 if name == "document_chat" else 18080))}
         overrides[name] = service["healthcheck_url"]
     if update_health_urls and overrides:
       try:
@@ -386,6 +450,114 @@ class BrainDriveRAGCommunityLifecycleManager(CommunityPluginLifecycleBase):
 
     return env_payload
 
+  def _hardcoded_ollama_models(self) -> List[Dict[str, Any]]:
+    specs: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for model_name, server_url, source in HARD_CODED_OLLAMA_MODELS:
+      model = str(model_name).strip()
+      base = normalize_server_base(str(server_url).strip())
+      if not model or not base.startswith(("http://", "https://")):
+        continue
+      key = (base, model)
+      record = specs.get(key)
+      if not record:
+        record = {"model_name": model, "server_url": base, "sources": []}
+        specs[key] = record
+      record["sources"].append(source)
+    return list(specs.values())
+
+  async def _fetch_ollama_tags(self, client: httpx.AsyncClient, server_base: str, headers: Dict[str, str]) -> Optional[Dict[str, Any]]:
+    try:
+      response = await client.get(f"{server_base}/api/tags", headers=headers)
+      response.raise_for_status()
+      return response.json()
+    except Exception as exc:
+      logger.warning("Failed to fetch Ollama tags", server_url=server_base, error=str(exc))
+      return None
+
+  async def _enqueue_missing_ollama_models(self, user_id: str) -> Dict[str, Any]:
+    jobs_env = os.environ.get("RAG_USE_JOB_MANAGER")
+    use_jobs = (jobs_env or "1").lower() in {"1", "true", "yes", "on"}
+    if not use_jobs:
+      return {"skipped": True, "reason": "job_manager_disabled"}
+    if not get_job_manager:
+      return {"skipped": True, "reason": "job_manager_unavailable"}
+
+    try:
+      model_specs = self._hardcoded_ollama_models()
+      if not model_specs:
+        return {"skipped": True, "reason": "no_ollama_models"}
+
+      server_groups: Dict[str, List[Dict[str, Any]]] = {}
+      for spec in model_specs:
+        server_groups.setdefault(spec["server_url"], []).append(spec)
+
+      results: List[Dict[str, Any]] = []
+      try:
+        job_manager = await get_job_manager()
+      except Exception as exc:
+        logger.warning("Job manager unavailable for model installs", error=str(exc))
+        return {"skipped": True, "reason": "job_manager_unavailable", "error": str(exc)}
+
+      async with httpx.AsyncClient(timeout=10.0, follow_redirects=False) as client:
+        for server_base, specs in server_groups.items():
+          headers = {"Content-Type": "application/json"}
+          tags_payload = await self._fetch_ollama_tags(client, server_base, headers)
+          if not tags_payload:
+            results.append({
+              "server_url": server_base,
+              "status": "skipped",
+              "reason": "ollama_unreachable",
+            })
+            continue
+          tokens = _build_model_token_index(tags_payload)
+
+          for spec in specs:
+            model_name = spec["model_name"]
+            model_key = model_name.strip().lower()
+            if model_key in tokens:
+              results.append({
+                "model_name": model_name,
+                "server_url": server_base,
+                "status": "skipped",
+                "reason": "already_present",
+                "sources": spec.get("sources", []),
+              })
+              continue
+            try:
+              payload = {
+                "model_name": model_name,
+                "server_url": server_base,
+              }
+              job, created = await job_manager.enqueue_job(
+                job_type="ollama.install",
+                payload=payload,
+                user_id=user_id,
+                idempotency_key=make_dedupe_key(server_base, model_name),
+                max_retries=1,
+              )
+              results.append({
+                "model_name": model_name,
+                "server_url": server_base,
+                "status": "queued",
+                "job_id": job.id,
+                "deduped": not created,
+                "sources": spec.get("sources", []),
+              })
+            except Exception as exc:
+              logger.warning("Failed to enqueue Ollama install", model=model_name, server_url=server_base, error=str(exc))
+              results.append({
+                "model_name": model_name,
+                "server_url": server_base,
+                "status": "error",
+                "error": str(exc),
+                "sources": spec.get("sources", []),
+              })
+
+      return {"skipped": False, "results": results}
+    except Exception as exc:
+      logger.warning("Skipping Ollama model installs due to unexpected error", error=str(exc))
+      return {"skipped": True, "reason": "error", "error": str(exc)}
+
   # ---------------------------------------------------------------------------
   # Install / uninstall / update
   # ---------------------------------------------------------------------------
@@ -405,6 +577,7 @@ class BrainDriveRAGCommunityLifecycleManager(CommunityPluginLifecycleBase):
       if settings_value:
         self._refresh_required_services_runtime_from_settings(settings_value)
       service_installs = await self._prepare_services(user_id)
+      model_installs = await self._enqueue_missing_ollama_models(user_id)
       service_starts = None
       auto_start = os.environ.get("RAG_AUTO_START", "1").lower() in {"1", "true", "yes", "on"}
       if auto_start and service_installs.get("mode") == "sync":
@@ -420,6 +593,7 @@ class BrainDriveRAGCommunityLifecycleManager(CommunityPluginLifecycleBase):
         "settings": settings_result,
         "settings_value": settings_value,
         "service_installs": service_installs,
+        "model_installs": model_installs,
         "service_starts": service_starts,
         "service_health": health,
         "service_metadata": get_service_metadata(),
