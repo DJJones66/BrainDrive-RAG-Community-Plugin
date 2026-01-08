@@ -24,10 +24,24 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 try:
   from app.core.encryption import encryption_service  # type: ignore
-  from app.core.job_manager_provider import get_job_manager  # type: ignore
 except Exception:  # pragma: no cover - fallback for remote install
   encryption_service = None
+
+try:
+  from app.core.job_manager_provider import get_job_manager  # type: ignore
+except Exception:  # pragma: no cover - fallback for remote install
   get_job_manager = None
+  try:
+    import sys
+
+    _current_dir = Path(__file__).resolve().parent
+    for parent in (_current_dir, *_current_dir.parents):
+      if (parent / "app" / "core" / "job_manager_provider.py").exists():
+        sys.path.insert(0, str(parent))
+        from app.core.job_manager_provider import get_job_manager  # type: ignore
+        break
+  except Exception:
+    get_job_manager = None
 
 try:
   from app.utils.ollama import normalize_server_base, make_dedupe_key  # type: ignore
