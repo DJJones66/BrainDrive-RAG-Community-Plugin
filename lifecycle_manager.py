@@ -76,6 +76,8 @@ restart_service = service_ops_module.restart_service
 
 start_service = service_ops_module.start_service
 
+pre_start_check = getattr(service_ops_module, "pre_start_check", None)
+
 health_check = service_ops_module.health_check
 get_service_metadata = service_ops_module.get_service_metadata
 get_required_env_vars_map = service_ops_module.get_required_env_vars_map
@@ -1063,9 +1065,21 @@ class BrainDriveRAGCommunityLifecycleManager(CommunityPluginLifecycleBase):
     installs: List[Dict[str, Any]] = []
     service_keys = ["document_chat", "document_processing"]
 
+    async def _auto_start_allowed(key: str) -> bool:
+      if not pre_start_check:
+        return True
+      try:
+        check = await pre_start_check(key)
+      except Exception as exc:
+        logger.warning("Pre-start check failed", service=key, error=str(exc))
+        return False
+      if isinstance(check, dict):
+        return bool(check.get("success", True))
+      return bool(check)
+
     async def _install_then_start(key: str) -> None:
       result = await prepare_service(key, full_install=full_install, force_recreate=force_recreate)
-      if auto_start and result.get("success"):
+      if auto_start and result.get("success") and await _auto_start_allowed(key):
         await start_service(key)
 
     if use_jobs and get_job_manager:
@@ -1100,7 +1114,7 @@ class BrainDriveRAGCommunityLifecycleManager(CommunityPluginLifecycleBase):
       for key in service_keys:
         install_result = await prepare_service(key, full_install=full_install, force_recreate=force_recreate)
         installs.append({"service": key, **install_result})
-        if auto_start and install_result.get("success"):
+        if auto_start and install_result.get("success") and await _auto_start_allowed(key):
           await start_service(key)
       return {"skipped": False, "installs": installs, "mode": "sync", "auto_start": auto_start}
 

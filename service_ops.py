@@ -160,6 +160,13 @@ DOC_CHAT_FALLBACK_ENV_VARS: List[str] = [
   "DOCUMENT_PROCESSOR_MAX_RETRIES",
 ]
 
+DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
+OLLAMA_BASE_URL_KEYS = (
+  "OLLAMA_LLM_BASE_URL",
+  "OLLAMA_EMBEDDING_BASE_URL",
+  "OLLAMA_CONTEXTUAL_LLM_BASE_URL",
+)
+
 
 @dataclass
 class ServiceConfig:
@@ -215,6 +222,71 @@ def _parse_env_lines(env_text: str) -> Dict[str, str]:
       continue
     values[key] = val.strip()
   return values
+
+
+def _clean_env_value(value: str) -> str:
+  return value.strip().strip('"').strip("'")
+
+
+def _load_env_file(path: Path) -> Dict[str, str]:
+  if not path.exists():
+    return {}
+  try:
+    return _parse_env_lines(path.read_text())
+  except OSError:
+    return {}
+
+
+def _should_check_ollama(env_values: Dict[str, str]) -> bool:
+  if not env_values:
+    return True
+  provider_keys = ("LLM_PROVIDER", "EMBEDDING_PROVIDER")
+  for key in provider_keys:
+    value = _clean_env_value(env_values.get(key, "")).lower()
+    if value == "ollama":
+      return True
+  return any(_clean_env_value(env_values.get(key, "")) for key in OLLAMA_BASE_URL_KEYS)
+
+
+def _resolve_ollama_urls(env_values: Dict[str, str]) -> List[str]:
+  urls: List[str] = []
+  for key in OLLAMA_BASE_URL_KEYS:
+    value = _clean_env_value(env_values.get(key, ""))
+    if not value:
+      continue
+    if not value.startswith(("http://", "https://")):
+      continue
+    urls.append(value.rstrip("/"))
+  if not urls and _should_check_ollama(env_values):
+    urls.append(DEFAULT_OLLAMA_BASE_URL.rstrip("/"))
+  # Deduplicate while preserving order.
+  seen = set()
+  deduped: List[str] = []
+  for url in urls:
+    if url in seen:
+      continue
+    seen.add(url)
+    deduped.append(url)
+  return deduped
+
+
+def _check_ollama_health(urls: List[str], timeout: int = 5) -> Dict[str, Any]:
+  failures: List[Dict[str, str]] = []
+  for base_url in urls:
+    version_url = f"{base_url}/api/version"
+    try:
+      with request.urlopen(version_url, timeout=timeout) as resp:
+        if resp.status != 200:
+          failures.append({"url": base_url, "error": f"HTTP {resp.status}"})
+    except error.HTTPError as exc:
+      failures.append({"url": base_url, "error": f"HTTP {exc.code}"})
+    except Exception as exc:
+      failures.append({"url": base_url, "error": str(exc)})
+  return {
+    "success": not failures,
+    "checked_urls": urls,
+    "failures": failures,
+  }
 
 
 def _parse_env_template(template_path: Path) -> Tuple[List[str], Dict[str, str]]:
@@ -549,6 +621,29 @@ async def start_service(service_key: str) -> Dict[str, Any]:
   return start_result
 
 
+async def pre_start_check(service_key: str) -> Dict[str, Any]:
+  """
+  Run pre-start checks before auto-starting a service.
+  Currently gates Document Chat Service on Ollama health.
+  """
+  if service_key != "document_chat":
+    return {"success": True, "skipped": True, "reason": "no_precheck_required"}
+
+  service = SERVICE_CONFIG.get(service_key)
+  if not service:
+    return {"success": False, "reason": "unknown_service"}
+  env_values = _load_env_file(service.repo_path / ".env")
+  if not _should_check_ollama(env_values):
+    return {"success": True, "skipped": True, "reason": "ollama_not_required"}
+  urls = _resolve_ollama_urls(env_values)
+  if not urls:
+    return {"success": False, "reason": "ollama_url_missing"}
+  result = await asyncio.to_thread(_check_ollama_health, urls)
+  if not result.get("success"):
+    result["reason"] = "ollama_unhealthy"
+  return result
+
+
 async def shutdown_service(service_key: str) -> Dict[str, Any]:
   service = SERVICE_CONFIG[service_key]
   await _ensure_repo(service)
@@ -782,6 +877,7 @@ __all__ = [
   "install_venv",
   "prepare_service",
   "start_service",
+  "pre_start_check",
   "shutdown_service",
   "restart_service",
   "health_check",
